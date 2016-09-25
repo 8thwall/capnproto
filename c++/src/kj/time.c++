@@ -29,4 +29,13 @@ kj::Exception Timer::makeTimeoutException() {
   return KJ_EXCEPTION(OVERLOADED, "operation timed out");
 }
 
+Clock& nullClock() {
+  class NullClock final: public Clock {
+  public:
+    Date now() override { return UNIX_EPOCH; }
+  };
+  static NullClock NULL_CLOCK;
+  return NULL_CLOCK;
+}
+
 }  // namespace kj
