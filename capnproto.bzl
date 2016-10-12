@@ -31,12 +31,12 @@ _capnp_gen = rule(
         "data": attr.label_list(allow_files=True),
         "includes": attr.string_list(),
         "capnp": attr.label(executable=True, cfg="host", single_file=True, mandatory=True,
-                            default=Label("//third_party/capnproto:capnp")),
+                            default=Label("//:capnp")),
         "capnpc_cxx": attr.label(executable=True, cfg="host", single_file=True,
                                  mandatory=True,
-                                 default=Label("//third_party/capnproto:capnpc-c++")),
-        "capnp_capnp": attr.label(default=Label("//third_party/capnproto:capnp-capnp")),
-        "capnp_system_include": attr.string(default="third_party/capnproto/c++/src"),
+                                 default=Label("//:capnpc-c++")),
+        "capnp_capnp": attr.label(default=Label("//:capnp-capnp")),
+        "capnp_system_include": attr.string(default="/c++/src"),
         "outs": attr.output_list(),
     },
     output_to_genfiles=True,
@@ -49,9 +49,9 @@ def cc_capnp_library(
         deps=[],
         data=[],
         include=None,
-        capnp="//third_party/capnproto:capnp",
-        capnpc_cxx="//third_party/capnproto:capnpc-c++",
-        capnp_capnp="//third_party/capnproto:capnp-capnp",
+        capnp="//:capnp",
+        capnpc_cxx="//:capnpc-c++",
+        capnp_capnp="//:capnp-capnp",
         **kargs):
     """Bazel rule to create a C++ capnproto library from capnp source files
     """
@@ -74,7 +74,7 @@ def cc_capnp_library(
         outs=outs,
         visibility=["//visibility:public"],
     )
-    cc_libs = ["//third_party/capnproto:capnp-lib"]
+    cc_libs = ["//:capnp-lib"]
     native.cc_library(
         name=name,
         srcs=outs,
