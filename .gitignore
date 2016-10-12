@@ -1,5 +1,8 @@
-# Kenton's personal backup script.
-/backup.sh
+# Bazel directories #
+/bazel-*
+
+# Vim hidden files.
+.*.swp
 
 # Eclipse-generated stuff.
 .cproject
