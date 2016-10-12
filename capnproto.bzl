@@ -36,7 +36,7 @@ _capnp_gen = rule(
                                  mandatory=True,
                                  default=Label("@capnproto//:capnpc-c++")),
         "capnp_capnp": attr.label(default=Label("@capnproto//:capnp-capnp")),
-        "capnp_system_include": attr.string(default="/c++/src"),
+        "capnp_system_include": attr.string(default=Label("@capnproto//:capnp").workspace_root + "/c++/src"),
         "outs": attr.output_list(),
     },
     output_to_genfiles=True,

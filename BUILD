@@ -12,11 +12,17 @@ cc_library(
         ],
         exclude = [
             "c++/src/kj/**/*-test.c++",
+            "c++/src/kj/test.c++",
         ],
     ),
-    hdrs = glob([
-        "c++/src/kj/**/*.h",
-    ]),
+    hdrs = glob(
+        [
+            "c++/src/kj/**/*.h",
+        ],
+        exclude = [
+            "c++/src/kj/test.h",
+        ],
+    ),
     copts = [
         "-Wno-sign-compare",
         "-Wno-strict-aliasing",
