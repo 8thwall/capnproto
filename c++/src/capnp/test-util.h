@@ -35,20 +35,6 @@
 #include "dynamic.h"
 #endif  // !CAPNP_LITE
 
-#if KJ_NO_EXCEPTIONS
-#undef EXPECT_ANY_THROW
-#define EXPECT_ANY_THROW(code) EXPECT_DEATH(code, ".")
-#endif
-
-#define EXPECT_NONFATAL_FAILURE(code) \
-  EXPECT_TRUE(kj::runCatchingExceptions([&]() { code; }) != nullptr);
-
-#ifdef KJ_DEBUG
-#define EXPECT_DEBUG_ANY_THROW EXPECT_ANY_THROW
-#else
-#define EXPECT_DEBUG_ANY_THROW(EXP)
-#endif
-
 // TODO(cleanup): Auto-generate stringification functions for union discriminants.
 namespace capnproto_test {
 namespace capnp {
@@ -227,6 +213,7 @@ public:
   TestPipelineImpl(int& callCount);
 
   kj::Promise<void> getCap(GetCapContext context) override;
+  kj::Promise<void> getAnyCap(GetAnyCapContext context) override;
 
 private:
   int& callCount;
@@ -285,6 +272,8 @@ public:
   kj::Promise<void> getHandle(GetHandleContext context) override;
 
   kj::Promise<void> getNull(GetNullContext context) override;
+
+  kj::Promise<void> getEnormousString(GetEnormousStringContext context) override;
 
 private:
   int& callCount;

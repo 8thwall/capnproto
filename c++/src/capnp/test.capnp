@@ -553,6 +553,11 @@ struct TestGenerics(Foo, Bar) {
       bar @1 :Bar;
       baz @2 :Baz;
       qux @3 :Qux;
+
+      interface DeepNestInterface(Quux) {
+        # At one time this failed to compile.
+        call @0 () -> ();
+      }
     }
   }
 
@@ -743,6 +748,23 @@ const embeddedData :Data = embed "testdata/packed";
 const embeddedText :Text = embed "testdata/short.txt";
 const embeddedStruct :TestAllTypes = embed "testdata/binary";
 
+const nonAsciiText :Text = "♫ é ✓";
+
+struct TestAnyPointerConstants {
+  anyKindAsStruct @0 :AnyPointer;
+  anyStructAsStruct @1 :AnyStruct;
+  anyKindAsList @2 :AnyPointer;
+  anyListAsList @3 :AnyList;
+
+}
+
+const anyPointerConstants :TestAnyPointerConstants = (
+  anyKindAsStruct = TestConstants.structConst,
+  anyStructAsStruct = TestConstants.structConst,
+  anyKindAsList = TestConstants.int32ListConst,
+  anyListAsList = TestConstants.int32ListConst,
+);
+
 interface TestInterface {
   foo @0 (i :UInt32, j :Bool) -> (x :Text);
   bar @1 () -> ();
@@ -760,9 +782,13 @@ interface TestExtends2 extends(TestExtends) {}
 interface TestPipeline {
   getCap @0 (n: UInt32, inCap :TestInterface) -> (s: Text, outBox :Box);
   testPointers @1 (cap :TestInterface, obj :AnyPointer, list :List(TestInterface)) -> ();
+  getAnyCap @2 (n: UInt32, inCap :Capability) -> (s: Text, outBox :AnyBox);
 
   struct Box {
     cap @0 :TestInterface;
+  }
+  struct AnyBox {
+    cap @0 :Capability;
   }
 }
 
@@ -818,12 +844,17 @@ interface TestMoreStuff extends(TestCallOrder) {
 
   methodWithDefaults @8 (a :Text, b :UInt32 = 123, c :Text = "foo") -> (d :Text, e :Text = "bar");
 
+  methodWithNullDefault @12 (a :Text, b :TestInterface = null);
+
   getHandle @9 () -> (handle :TestHandle);
   # Get a new handle. Tests have an out-of-band way to check the current number of live handles, so
   # this can be used to test garbage collection.
 
   getNull @10 () -> (nullCap :TestMoreStuff);
   # Always returns a null capability.
+
+  getEnormousString @11 () -> (str :Text);
+  # Attempts to return an 100MB string. Should always fail.
 }
 
 interface TestMembrane {

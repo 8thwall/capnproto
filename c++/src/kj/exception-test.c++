@@ -28,6 +28,9 @@ namespace _ {  // private
 namespace {
 
 TEST(Exception, TrimSourceFilename) {
+#if _WIN32
+  if (trimSourceFilename(__FILE__) != "kj\\exception-test.c++")
+#endif
   EXPECT_EQ(trimSourceFilename(__FILE__), "kj/exception-test.c++");
 }
 
@@ -97,11 +100,7 @@ TEST(Exception, UnwindDetector) {
 
 #if !__MINGW32__  // Inexplicably crashes when exception is thrown from constructor.
 TEST(Exception, ExceptionCallbackMustBeOnStack) {
-#if KJ_NO_EXCEPTIONS
-  EXPECT_DEATH_IF_SUPPORTED(new ExceptionCallback, "must be allocated on the stack");
-#else
-  EXPECT_ANY_THROW(new ExceptionCallback);
-#endif
+  KJ_EXPECT_THROW_MESSAGE("must be allocated on the stack", new ExceptionCallback);
 }
 #endif  // !__MINGW32__
 

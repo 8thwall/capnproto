@@ -255,18 +255,40 @@ class PtmfHelper {
   friend struct GetFunctorStartAddress;
 
 #if __GNUG__
+
   void* ptr;
   ptrdiff_t adj;
   // Layout of a pointer-to-member-function used by GCC and compatible compilers.
+
+  void* apply(void* obj) {
+#if defined(__arm__) || defined(__mips__) || defined(__aarch64__)
+    if (adj & 1) {
+      ptrdiff_t voff = (ptrdiff_t)ptr;
 #else
-#error "TODO(port): PTMF instruction address extraction"
+    ptrdiff_t voff = (ptrdiff_t)ptr;
+    if (voff & 1) {
+      voff &= ~1;
 #endif
+      return *(void**)(*(char**)obj + voff);
+    } else {
+      return ptr;
+    }
+  }
 
 #define BODY \
     PtmfHelper result; \
     static_assert(sizeof(p) == sizeof(result), "unknown ptmf layout"); \
     memcpy(&result, &p, sizeof(result)); \
     return result
+
+#else  // __GNUG__
+
+  void* apply(void* obj) { return nullptr; }
+  // TODO(port):  PTMF instruction address extraction
+
+#define BODY return PtmfHelper{}
+
+#endif  // __GNUG__, else
 
   template <typename R, typename C, typename... P, typename F>
   static PtmfHelper from(F p) { BODY; }
@@ -284,21 +306,6 @@ class PtmfHelper {
   // guess at P. Luckily, if the function parameters are template parameters then it's not
   // necessary to be precise about P.
 #undef BODY
-
-  void* apply(void* obj) {
-#if defined(__arm__) || defined(__mips__) || defined(__aarch64__)
-    if (adj & 1) {
-      ptrdiff_t voff = (ptrdiff_t)ptr;
-#else
-    ptrdiff_t voff = (ptrdiff_t)ptr;
-    if (voff & 1) {
-      voff &= ~1;
-#endif
-      return *(void**)(*(char**)obj + voff);
-    } else {
-      return ptr;
-    }
-  }
 };
 
 template <typename... ParamTypes>
@@ -856,6 +863,26 @@ T Promise<T>::wait(WaitScope& waitScope) {
     return _::returnMaybeVoid(kj::mv(*value));
   } else KJ_IF_MAYBE(exception, result.exception) {
     throwFatalException(kj::mv(*exception));
+  } else {
+    // Result contained neither a value nor an exception?
+    KJ_UNREACHABLE;
+  }
+}
+
+template <>
+inline void Promise<void>::wait(WaitScope& waitScope) {
+  // Override <void> case to use throwRecoverableException().
+
+  _::ExceptionOr<_::Void> result;
+
+  waitImpl(kj::mv(node), result, waitScope);
+
+  if (result.value != nullptr) {
+    KJ_IF_MAYBE(exception, result.exception) {
+      throwRecoverableException(kj::mv(*exception));
+    }
+  } else KJ_IF_MAYBE(exception, result.exception) {
+    throwRecoverableException(kj::mv(*exception));
   } else {
     // Result contained neither a value nor an exception?
     KJ_UNREACHABLE;

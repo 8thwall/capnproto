@@ -34,6 +34,7 @@
 #include <kj/mutex.h>
 #include <kj/exception.h>
 #include <kj/vector.h>
+#include <kj/units.h>
 #include "common.h"
 #include "message.h"
 #include "layout.h"
@@ -85,7 +86,7 @@ public:
 
   inline void reset(WordCount64 limit);
 
-  KJ_ALWAYS_INLINE(bool canRead(WordCount amount, Arena* arena));
+  KJ_ALWAYS_INLINE(bool canRead(WordCount64 amount, Arena* arena));
 
   void unread(WordCount64 amount);
   // Adds back some words to the limit.  Useful when the caller knows they are double-reading
@@ -113,10 +114,23 @@ public:
 
 class SegmentReader {
 public:
-  inline SegmentReader(Arena* arena, SegmentId id, kj::ArrayPtr<const word> ptr,
+  inline SegmentReader(Arena* arena, SegmentId id, const word* ptr, SegmentWordCount size,
                        ReadLimiter* readLimiter);
 
-  KJ_ALWAYS_INLINE(bool containsInterval(const void* from, const void* to));
+  KJ_ALWAYS_INLINE(const word* checkOffset(const word* from, ptrdiff_t offset));
+  // Adds the given offset to the given pointer, checks that it is still within the bounds of the
+  // segment, then returns it. Note that the "end" pointer of the segment (which technically points
+  // to the word after the last in the segment) is considered in-bounds for this purpose, so you
+  // can't necessarily dereference it. You must call checkObject() next to check that the object
+  // you want to read is entirely in-bounds.
+  //
+  // If `from + offset` is out-of-range, this returns a pointer to the end of the segment. Thus,
+  // any non-zero-sized object will fail `checkObject()`. We do this instead of throwing to save
+  // some code footprint.
+
+  KJ_ALWAYS_INLINE(bool checkObject(const word* start, WordCountN<31> size));
+  // Assuming that `start` is in-bounds for this segment (probably checked using `checkOffset()`),
+  // check that `start + size` is also in-bounds, and hence the whole area in-between is valid.
 
   KJ_ALWAYS_INLINE(bool amplifiedRead(WordCount virtualAmount));
   // Indicates that the reader should pretend that `virtualAmount` additional data was read even
@@ -129,8 +143,8 @@ public:
   inline SegmentId getSegmentId();
 
   inline const word* getStartPtr();
-  inline WordCount getOffsetTo(const word* ptr);
-  inline WordCount getSize();
+  inline SegmentWordCount getOffsetTo(const word* ptr);
+  inline SegmentWordCount getSize();
 
   inline kj::ArrayPtr<const word> getArray();
 
@@ -140,29 +154,32 @@ public:
 private:
   Arena* arena;
   SegmentId id;
-  kj::ArrayPtr<const word> ptr;
+  kj::ArrayPtr<const word> ptr;  // size guaranteed to fit in SEGMENT_WORD_COUNT_BITS bits
   ReadLimiter* readLimiter;
 
   KJ_DISALLOW_COPY(SegmentReader);
 
   friend class SegmentBuilder;
+
+  static void abortCheckObjectFault();
+  // Called in debug mode in cases that would segfault in opt mode. (Should be impossible!)
 };
 
 class SegmentBuilder: public SegmentReader {
 public:
-  inline SegmentBuilder(BuilderArena* arena, SegmentId id, kj::ArrayPtr<word> ptr,
-                        ReadLimiter* readLimiter, size_t wordsUsed = 0);
-  inline SegmentBuilder(BuilderArena* arena, SegmentId id, kj::ArrayPtr<const word> ptr,
+  inline SegmentBuilder(BuilderArena* arena, SegmentId id, word* ptr, SegmentWordCount size,
+                        ReadLimiter* readLimiter, SegmentWordCount wordsUsed = ZERO * WORDS);
+  inline SegmentBuilder(BuilderArena* arena, SegmentId id, const word* ptr, SegmentWordCount size,
                         ReadLimiter* readLimiter);
   inline SegmentBuilder(BuilderArena* arena, SegmentId id, decltype(nullptr),
                         ReadLimiter* readLimiter);
 
-  KJ_ALWAYS_INLINE(word* allocate(WordCount amount));
+  KJ_ALWAYS_INLINE(word* allocate(SegmentWordCount amount));
 
   KJ_ALWAYS_INLINE(void checkWritable());
   // Throw an exception if the segment is read-only (meaning it is a reference to external data).
 
-  KJ_ALWAYS_INLINE(word* getPtrUnchecked(WordCount offset));
+  KJ_ALWAYS_INLINE(word* getPtrUnchecked(SegmentWordCount offset));
   // Get a writable pointer into the segment.  Throws an exception if the segment is read-only (i.e.
   // a reference to external immutable data).
 
@@ -210,7 +227,7 @@ public:
 
 class ReaderArena final: public Arena {
 public:
-  ReaderArena(MessageReader* message);
+  explicit ReaderArena(MessageReader* message);
   ~ReaderArena() noexcept(false);
   KJ_DISALLOW_COPY(ReaderArena);
 
@@ -234,6 +251,9 @@ private:
   // TODO(perf):  Thread-local thing instead?  Some kind of lockless map?  Or do sharing of data
   //   in a different way, where you have to construct a new MessageReader in each thread (but
   //   possibly backed by the same data)?
+
+  ReaderArena(MessageReader* message, kj::ArrayPtr<const word> firstSegment);
+  ReaderArena(MessageReader* message, const word* firstSegment, SegmentWordCount firstSegmentSize);
 };
 
 class BuilderArena final: public Arena {
@@ -277,7 +297,7 @@ public:
     word* words;
   };
 
-  AllocateResult allocate(WordCount amount);
+  AllocateResult allocate(SegmentWordCount amount);
   // Find a segment with at least the given amount of space available and allocate the space.
   // Note that allocating directly from a particular segment is much faster, but allocating from
   // the arena is guaranteed to succeed.  Therefore callers should try to allocate from a specific
@@ -339,35 +359,49 @@ private:
 inline ReadLimiter::ReadLimiter()
     : limit(kj::maxValue) {}
 
-inline ReadLimiter::ReadLimiter(WordCount64 limit): limit(limit / WORDS) {}
+inline ReadLimiter::ReadLimiter(WordCount64 limit): limit(unbound(limit / WORDS)) {}
 
-inline void ReadLimiter::reset(WordCount64 limit) { this->limit = limit / WORDS; }
+inline void ReadLimiter::reset(WordCount64 limit) { this->limit = unbound(limit / WORDS); }
 
-inline bool ReadLimiter::canRead(WordCount amount, Arena* arena) {
+inline bool ReadLimiter::canRead(WordCount64 amount, Arena* arena) {
   // Be careful not to store an underflowed value into `limit`, even if multiple threads are
   // decrementing it.
   uint64_t current = limit;
-  if (KJ_UNLIKELY(amount / WORDS > current)) {
+  if (KJ_UNLIKELY(unbound(amount / WORDS) > current)) {
     arena->reportReadLimitReached();
     return false;
   } else {
-    limit = current - amount / WORDS;
+    limit = current - unbound(amount / WORDS);
     return true;
   }
 }
 
 // -------------------------------------------------------------------
 
-inline SegmentReader::SegmentReader(Arena* arena, SegmentId id, kj::ArrayPtr<const word> ptr,
-                                    ReadLimiter* readLimiter)
-    : arena(arena), id(id), ptr(ptr), readLimiter(readLimiter) {}
+inline SegmentReader::SegmentReader(Arena* arena, SegmentId id, const word* ptr,
+                                    SegmentWordCount size, ReadLimiter* readLimiter)
+    : arena(arena), id(id), ptr(kj::arrayPtr(ptr, unbound(size / WORDS))),
+      readLimiter(readLimiter) {}
 
-inline bool SegmentReader::containsInterval(const void* from, const void* to) {
-  return from >= this->ptr.begin() && to <= this->ptr.end() && from <= to &&
-      readLimiter->canRead(
-          intervalLength(reinterpret_cast<const byte*>(from),
-                         reinterpret_cast<const byte*>(to)) / BYTES_PER_WORD,
-          arena);
+inline const word* SegmentReader::checkOffset(const word* from, ptrdiff_t offset) {
+  ptrdiff_t min = ptr.begin() - from;
+  ptrdiff_t max = ptr.end() - from;
+  if (offset >= min && offset <= max) {
+    return from + offset;
+  } else {
+    return ptr.end();
+  }
+}
+
+inline bool SegmentReader::checkObject(const word* start, WordCountN<31> size) {
+  auto startOffset = intervalLength(ptr.begin(), start, MAX_SEGMENT_WORDS);
+#ifdef KJ_DEBUG
+  if (startOffset > bounded(ptr.size()) * WORDS) {
+    abortCheckObjectFault();
+  }
+#endif
+  return startOffset + size <= bounded(ptr.size()) * WORDS &&
+      readLimiter->canRead(size, arena);
 }
 
 inline bool SegmentReader::amplifiedRead(WordCount virtualAmount) {
@@ -377,32 +411,37 @@ inline bool SegmentReader::amplifiedRead(WordCount virtualAmount) {
 inline Arena* SegmentReader::getArena() { return arena; }
 inline SegmentId SegmentReader::getSegmentId() { return id; }
 inline const word* SegmentReader::getStartPtr() { return ptr.begin(); }
-inline WordCount SegmentReader::getOffsetTo(const word* ptr) {
-  return intervalLength(this->ptr.begin(), ptr);
+inline SegmentWordCount SegmentReader::getOffsetTo(const word* ptr) {
+  KJ_IREQUIRE(this->ptr.begin() <= ptr && ptr <= this->ptr.end());
+  return intervalLength(this->ptr.begin(), ptr, MAX_SEGMENT_WORDS);
 }
-inline WordCount SegmentReader::getSize() { return ptr.size() * WORDS; }
+inline SegmentWordCount SegmentReader::getSize() {
+  return assumeBits<SEGMENT_WORD_COUNT_BITS>(ptr.size()) * WORDS;
+}
 inline kj::ArrayPtr<const word> SegmentReader::getArray() { return ptr; }
 inline void SegmentReader::unread(WordCount64 amount) { readLimiter->unread(amount); }
 
 // -------------------------------------------------------------------
 
 inline SegmentBuilder::SegmentBuilder(
-    BuilderArena* arena, SegmentId id, kj::ArrayPtr<word> ptr, ReadLimiter* readLimiter,
-    size_t wordsUsed)
-    : SegmentReader(arena, id, ptr, readLimiter), pos(ptr.begin() + wordsUsed), readOnly(false) {}
+    BuilderArena* arena, SegmentId id, word* ptr, SegmentWordCount size,
+    ReadLimiter* readLimiter, SegmentWordCount wordsUsed)
+    : SegmentReader(arena, id, ptr, size, readLimiter),
+      pos(ptr + wordsUsed), readOnly(false) {}
 inline SegmentBuilder::SegmentBuilder(
-    BuilderArena* arena, SegmentId id, kj::ArrayPtr<const word> ptr, ReadLimiter* readLimiter)
-    : SegmentReader(arena, id, ptr, readLimiter),
+    BuilderArena* arena, SegmentId id, const word* ptr, SegmentWordCount size,
+    ReadLimiter* readLimiter)
+    : SegmentReader(arena, id, ptr, size, readLimiter),
       // const_cast is safe here because the member won't ever be dereferenced because it appears
       // to point to the end of the segment anyway.
-      pos(const_cast<word*>(ptr.end())),
-      readOnly(true) {}
+      pos(const_cast<word*>(ptr + size)), readOnly(true) {}
 inline SegmentBuilder::SegmentBuilder(BuilderArena* arena, SegmentId id, decltype(nullptr),
                                       ReadLimiter* readLimiter)
-    : SegmentReader(arena, id, nullptr, readLimiter), pos(nullptr), readOnly(false) {}
+    : SegmentReader(arena, id, nullptr, ZERO * WORDS, readLimiter),
+      pos(nullptr), readOnly(false) {}
 
-inline word* SegmentBuilder::allocate(WordCount amount) {
-  if (intervalLength(pos, ptr.end()) < amount) {
+inline word* SegmentBuilder::allocate(SegmentWordCount amount) {
+  if (intervalLength(pos, ptr.end(), MAX_SEGMENT_WORDS) < amount) {
     // Not enough space in the segment for this allocation.
     return nullptr;
   } else {
@@ -417,7 +456,7 @@ inline void SegmentBuilder::checkWritable() {
   if (KJ_UNLIKELY(readOnly)) throwNotWritable();
 }
 
-inline word* SegmentBuilder::getPtrUnchecked(WordCount offset) {
+inline word* SegmentBuilder::getPtrUnchecked(SegmentWordCount offset) {
   return const_cast<word*>(ptr.begin() + offset);
 }
 
@@ -432,7 +471,7 @@ inline kj::ArrayPtr<const word> SegmentBuilder::currentlyAllocated() {
 }
 
 inline void SegmentBuilder::reset() {
-  word* start = getPtrUnchecked(0 * WORDS);
+  word* start = getPtrUnchecked(ZERO * WORDS);
   memset(start, 0, (pos - start) * sizeof(word));
   pos = start;
 }

@@ -2102,8 +2102,28 @@ private:
           auto typeBuilder = slot.initType();
           if (translator.compileType(member.fieldType, typeBuilder, implicitMethodParams)) {
             if (member.hasDefaultValue) {
-              translator.compileBootstrapValue(member.fieldDefaultValue,
-                                               typeBuilder, slot.initDefaultValue());
+              if (member.isParam &&
+                  member.fieldDefaultValue.isRelativeName() &&
+                  member.fieldDefaultValue.getRelativeName().getValue() == "null") {
+                // special case: parameter set null
+                switch (typeBuilder.which()) {
+                  case schema::Type::TEXT:
+                  case schema::Type::DATA:
+                  case schema::Type::LIST:
+                  case schema::Type::STRUCT:
+                  case schema::Type::INTERFACE:
+                  case schema::Type::ANY_POINTER:
+                    break;
+                  default:
+                    errorReporter.addErrorOn(member.fieldDefaultValue.getRelativeName(),
+                        "Only pointer parameters can declare their default as 'null'.");
+                    break;
+                }
+                translator.compileDefaultDefaultValue(typeBuilder, slot.initDefaultValue());
+              } else {
+                translator.compileBootstrapValue(member.fieldDefaultValue,
+                                                 typeBuilder, slot.initDefaultValue());
+              }
               slot.setHadExplicitDefault(true);
             } else {
               translator.compileDefaultDefaultValue(typeBuilder, slot.initDefaultValue());
@@ -2726,6 +2746,15 @@ kj::Maybe<Orphan<DynamicValue>> ValueTranslator::compileValue(Expression::Reader
         if (result.getReader().as<DynamicList>().getSchema() == type.asList()) {
           return kj::mv(result);
         }
+      } else if (type.isAnyPointer()) {
+        switch (type.whichAnyPointerKind()) {
+          case schema::Type::AnyPointer::Unconstrained::ANY_KIND:
+          case schema::Type::AnyPointer::Unconstrained::LIST:
+            return kj::mv(result);
+          case schema::Type::AnyPointer::Unconstrained::STRUCT:
+          case schema::Type::AnyPointer::Unconstrained::CAPABILITY:
+            break;
+        }
       }
       break;
 
@@ -2741,6 +2770,15 @@ kj::Maybe<Orphan<DynamicValue>> ValueTranslator::compileValue(Expression::Reader
       if (type.isStruct()) {
         if (result.getReader().as<DynamicStruct>().getSchema() == type.asStruct()) {
           return kj::mv(result);
+        }
+      } else if (type.isAnyPointer()) {
+        switch (type.whichAnyPointerKind()) {
+          case schema::Type::AnyPointer::Unconstrained::ANY_KIND:
+          case schema::Type::AnyPointer::Unconstrained::STRUCT:
+            return kj::mv(result);
+          case schema::Type::AnyPointer::Unconstrained::LIST:
+          case schema::Type::AnyPointer::Unconstrained::CAPABILITY:
+            break;
         }
       }
       break;

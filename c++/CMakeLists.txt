@@ -1,6 +1,6 @@
 project("Cap'n Proto" CXX)
-cmake_minimum_required(VERSION 3.0)
-set(VERSION 0.6-dev)
+cmake_minimum_required(VERSION 3.1)
+set(VERSION 0.6.1)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -34,11 +34,6 @@ if(CAPNP_LITE AND BUILD_TESTING AND NOT EXTERNAL_CAPNP)
   message(SEND_ERROR "You must set EXTERNAL_CAPNP when using CAPNP_LITE and BUILD_TESTING.")
 endif()
 
-
-if(MSVC AND NOT CAPNP_LITE)
-  message(SEND_ERROR "Building with MSVC is only supported with CAPNP_LITE.")
-endif()
-
 if(CAPNP_LITE)
   set(CAPNP_LITE_FLAG "-DCAPNP_LITE")
   # This flag is attached as PUBLIC target_compile_definition to kj target
@@ -49,6 +44,14 @@ endif()
 if(MSVC)
   # TODO(cleanup): Enable higher warning level in MSVC, but make sure to test
   #   build with that warning level and clean out false positives.
+
+  add_compile_options(/wo4503)
+  # Only warn once on truncated decorated names. The maximum symbol length MSVC
+  # supports is 4k characters, which the parser framework regularly blows. The
+  # compiler likes to print out the entire type that went over the limit along
+  # with this warning, which gets unbearably spammy. That said, we don't want to
+  # just ignore it, so I'm letting it trigger once until we find some places to
+  # inject ParserRefs.
 else()
   # Note that it's important to add new CXXFLAGS before ones specified by the
   # user, so that the user's flags override them. This is particularly
@@ -60,10 +63,11 @@ else()
   #   recognize as safe.
   # * sign-compare: Low S/N ratio.
   # * unused-parameter: Low S/N ratio.
-  #
-  # We have to use -std=gnu++0x isntead of -std=c++11 because otherwise we lose
-  # GNU extensions that we need.
-  add_compile_options(-std=gnu++0x -Wall -Wextra -Wno-strict-aliasing -Wno-sign-compare -Wno-unused-parameter)
+  add_compile_options(-Wall -Wextra -Wno-strict-aliasing -Wno-sign-compare -Wno-unused-parameter)
+
+  if(DEFINED CMAKE_CXX_EXTENSIONS AND NOT CMAKE_CXX_EXTENSIONS)
+    message(SEND_ERROR "Cap'n Proto requires compiler-specific extensions (e.g., -std=gnu++11). Please leave CMAKE_CXX_EXTENSIONS undefined or ON.")
+  endif()
 
   if (NOT ANDROID)
     add_compile_options(-pthread)

@@ -32,6 +32,7 @@
 
 #include <kj/async.h>
 #include <kj/vector.h>
+#include "raw-schema.h"
 #include "any.h"
 #include "pointer-helpers.h"
 
@@ -64,8 +65,6 @@ public:
 
 class LocalClient;
 namespace _ { // private
-struct RawSchema;
-struct RawBrandedSchema;
 extern const RawSchema NULL_INTERFACE_SCHEMA;  // defined in schema.c++
 class CapabilityServerSetBase;
 }  // namespace _ (private)
@@ -83,11 +82,9 @@ struct Capability {
     static constexpr Kind kind = Kind::INTERFACE;
     static constexpr _::RawSchema const* schema = &_::NULL_INTERFACE_SCHEMA;
 
-    static const _::RawBrandedSchema* const brand;
-    // Can't quite declare this one inline without including generated-header-support.h. Avoiding
-    // for now by declaring out-of-line.
-    // TODO(cleanup): Split RawSchema stuff into its own header that can be included here, or
-    //   something.
+    static const _::RawBrandedSchema* brand() {
+      return &_::NULL_INTERFACE_SCHEMA.defaultBrand;
+    }
   };
 };
 
@@ -653,10 +650,11 @@ struct List<T, Kind::INTERFACE> {
     Reader() = default;
     inline explicit Reader(_::ListReader reader): reader(reader) {}
 
-    inline uint size() const { return reader.size() / ELEMENTS; }
+    inline uint size() const { return unbound(reader.size() / ELEMENTS); }
     inline typename T::Client operator[](uint index) const {
       KJ_IREQUIRE(index < size());
-      return typename T::Client(reader.getPointerElement(index * ELEMENTS).getCapability());
+      return typename T::Client(reader.getPointerElement(
+          bounded(index) * ELEMENTS).getCapability());
     }
 
     typedef _::IndexingIterator<const Reader, typename T::Client> Iterator;
@@ -685,22 +683,23 @@ struct List<T, Kind::INTERFACE> {
     inline operator Reader() const { return Reader(builder.asReader()); }
     inline Reader asReader() const { return Reader(builder.asReader()); }
 
-    inline uint size() const { return builder.size() / ELEMENTS; }
+    inline uint size() const { return unbound(builder.size() / ELEMENTS); }
     inline typename T::Client operator[](uint index) {
       KJ_IREQUIRE(index < size());
-      return typename T::Client(builder.getPointerElement(index * ELEMENTS).getCapability());
+      return typename T::Client(builder.getPointerElement(
+          bounded(index) * ELEMENTS).getCapability());
     }
     inline void set(uint index, typename T::Client value) {
       KJ_IREQUIRE(index < size());
-      builder.getPointerElement(index * ELEMENTS).setCapability(kj::mv(value.hook));
+      builder.getPointerElement(bounded(index) * ELEMENTS).setCapability(kj::mv(value.hook));
     }
     inline void adopt(uint index, Orphan<T>&& value) {
       KJ_IREQUIRE(index < size());
-      builder.getPointerElement(index * ELEMENTS).adopt(kj::mv(value));
+      builder.getPointerElement(bounded(index) * ELEMENTS).adopt(kj::mv(value));
     }
     inline Orphan<T> disown(uint index) {
       KJ_IREQUIRE(index < size());
-      return Orphan<T>(builder.getPointerElement(index * ELEMENTS).disown());
+      return Orphan<T>(builder.getPointerElement(bounded(index) * ELEMENTS).disown());
     }
 
     typedef _::IndexingIterator<Builder, typename T::Client> Iterator;
@@ -716,7 +715,7 @@ struct List<T, Kind::INTERFACE> {
 
 private:
   inline static _::ListBuilder initPointer(_::PointerBuilder builder, uint size) {
-    return builder.initList(ElementSize::POINTER, size * ELEMENTS);
+    return builder.initList(ElementSize::POINTER, bounded(size) * ELEMENTS);
   }
   inline static _::ListBuilder getFromPointer(_::PointerBuilder builder, const word* defaultValue) {
     return builder.getList(ElementSize::POINTER, defaultValue);

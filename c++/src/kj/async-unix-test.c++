@@ -19,6 +19,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#if !_WIN32
+
 #include "async-unix.h"
 #include "thread.h"
 #include "debug.h"
@@ -34,6 +36,7 @@
 #include <algorithm>
 
 namespace kj {
+namespace {
 
 inline void delay() { usleep(10000); }
 
@@ -472,7 +475,8 @@ TEST(AsyncUnixTest, UrgentObserver) {
   // Spawn a TCP server
   KJ_SYSCALL(tmpFd = socket(AF_INET, SOCK_STREAM, 0));
   kj::AutoCloseFd serverFd(tmpFd);
-  sockaddr_in saddr = {};
+  sockaddr_in saddr;
+  memset(&saddr, 0, sizeof(saddr));
   saddr.sin_family = AF_INET;
   saddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   KJ_SYSCALL(bind(serverFd, reinterpret_cast<sockaddr*>(&saddr), sizeof(saddr)));
@@ -509,12 +513,23 @@ TEST(AsyncUnixTest, UrgentObserver) {
   UnixEventPort::FdObserver observer(port, clientFd,
       UnixEventPort::FdObserver::OBSERVE_READ | UnixEventPort::FdObserver::OBSERVE_URGENT);
 
-  // Attempt to read the urgent byte prior to reading the in-band byte.
   observer.whenUrgentDataAvailable().wait(waitScope);
+
+#if __CYGWIN__
+  // On Cygwin, reading the urgent byte first causes the subsequent regular read to block until
+  // such a time as the connection closes -- and then the byte is successfully returned. This
+  // seems to be a cygwin bug.
+  KJ_SYSCALL(recv(clientFd, &c, 1, 0));
+  EXPECT_EQ('i', c);
+  KJ_SYSCALL(recv(clientFd, &c, 1, MSG_OOB));
+  EXPECT_EQ('o', c);
+#else
+  // Attempt to read the urgent byte prior to reading the in-band byte.
   KJ_SYSCALL(recv(clientFd, &c, 1, MSG_OOB));
   EXPECT_EQ('o', c);
   KJ_SYSCALL(recv(clientFd, &c, 1, 0));
   EXPECT_EQ('i', c);
+#endif
 
   // Allow server thread to let its clientFd go out of scope.
   c = 'q';
@@ -529,14 +544,16 @@ TEST(AsyncUnixTest, SteadyTimers) {
   EventLoop loop(port);
   WaitScope waitScope(loop);
 
-  auto start = port.steadyTime();
+  auto& timer = port.getTimer();
+
+  auto start = timer.now();
   kj::Vector<TimePoint> expected;
   kj::Vector<TimePoint> actual;
 
   auto addTimer = [&](Duration delay) {
     expected.add(max(start + delay, start));
-    port.atSteadyTime(start + delay).then([&]() {
-      actual.add(port.steadyTime());
+    timer.atTime(start + delay).then([&]() {
+      actual.add(timer.now());
     }).detach([](Exception&& e) { ADD_FAILURE() << str(e).cStr(); });
   };
 
@@ -547,7 +564,7 @@ TEST(AsyncUnixTest, SteadyTimers) {
   addTimer(-10 * MILLISECONDS);
 
   std::sort(expected.begin(), expected.end());
-  port.atSteadyTime(expected.back() + MILLISECONDS).wait(waitScope);
+  timer.atTime(expected.back() + MILLISECONDS).wait(waitScope);
 
   ASSERT_EQ(expected.size(), actual.size());
   for (int i = 0; i < expected.size(); ++i) {
@@ -571,7 +588,7 @@ TEST(AsyncUnixTest, Wake) {
   EXPECT_TRUE(port.wait());
 
   {
-    auto promise = port.atSteadyTime(port.steadyTime());
+    auto promise = port.getTimer().atTime(port.getTimer().now());
     EXPECT_FALSE(port.wait());
   }
 
@@ -585,4 +602,7 @@ TEST(AsyncUnixTest, Wake) {
   EXPECT_TRUE(port.wait());
 }
 
+}  // namespace
 }  // namespace kj
+
+#endif  // !_WIN32

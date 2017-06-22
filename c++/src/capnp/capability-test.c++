@@ -338,6 +338,49 @@ TEST(Capability, DynamicClientPipelining) {
   EXPECT_EQ(1, chainedCallCount);
 }
 
+TEST(Capability, DynamicClientPipelineAnyCap) {
+  kj::EventLoop loop;
+  kj::WaitScope waitScope(loop);
+
+  int callCount = 0;
+  int chainedCallCount = 0;
+  DynamicCapability::Client client =
+      test::TestPipeline::Client(kj::heap<TestPipelineImpl>(callCount));
+
+  auto request = client.newRequest("getAnyCap");
+  request.set("n", 234);
+  request.set("inCap", test::TestInterface::Client(kj::heap<TestInterfaceImpl>(chainedCallCount)));
+
+  auto promise = request.send();
+
+  auto outAnyCap = promise.get("outBox").releaseAs<DynamicStruct>()
+                          .get("cap").releaseAs<DynamicCapability>();
+
+  EXPECT_EQ(Schema::from<Capability>(), outAnyCap.getSchema());
+  auto outCap = outAnyCap.castAs<DynamicCapability>(Schema::from<test::TestInterface>());
+
+  auto pipelineRequest = outCap.newRequest("foo");
+  pipelineRequest.set("i", 321);
+  auto pipelinePromise = pipelineRequest.send();
+
+  auto pipelineRequest2 = outCap.castAs<test::TestExtends>().graultRequest();
+  auto pipelinePromise2 = pipelineRequest2.send();
+
+  promise = nullptr;  // Just to be annoying, drop the original promise.
+
+  EXPECT_EQ(0, callCount);
+  EXPECT_EQ(0, chainedCallCount);
+
+  auto response = pipelinePromise.wait(waitScope);
+  EXPECT_EQ("bar", response.get("x").as<Text>());
+
+  auto response2 = pipelinePromise2.wait(waitScope);
+  checkTestMessage(response2);
+
+  EXPECT_EQ(3, callCount);
+  EXPECT_EQ(1, chainedCallCount);
+}
+
 // =======================================================================================
 
 class TestInterfaceDynamicImpl final: public DynamicCapability::Server {
@@ -499,7 +542,7 @@ public:
       request.set("j", true);
 
       return request.send().then(
-          [this,context](capnp::Response<DynamicStruct>&& response) mutable {
+          [this,KJ_CPCAP(context)](capnp::Response<DynamicStruct>&& response) mutable {
             EXPECT_EQ("foo", response.get("x").as<Text>());
 
             auto result = context.getResults();
@@ -510,12 +553,15 @@ public:
             // Too lazy to write a whole separate test for each of these cases...  so just make
             // sure they both compile here, and only actually test the latter.
             box.set("cap", kj::heap<TestExtendsDynamicImpl>(callCount));
-#if __GNUG__ && !__clang__
-            // The last line in this block tickles a bug in Debian G++ 4.9.2:
+#if __GNUG__ && !__clang__ && __GNUG__ == 4 && __GNUC_MINOR__ == 9
+            // The last line in this block tickles a bug in Debian G++ 4.9.2 that is not present
+            // in 4.8.x nor in 4.9.4:
             //     https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=781060
-            // For the moment, we can get away with skipping it as the previous line will set
-            // things up in a way that allows the test to complete successfully.
-            // TODO(soon): Remove this #if block when the bug is fixed.
+            //
+            // Unfortunatley 4.9.2 is present on many Debian Jessie systems..
+            //
+            // For the moment, we can get away with skipping the last line as the previous line
+            // will set things up in a way that allows the test to complete successfully.
             return;
 #endif
             box.set("cap", kj::heap<TestExtendsImpl>(callCount));

@@ -115,7 +115,26 @@ kj::Exception toException(const rpc::Exception::Reader& exception) {
 void fromException(const kj::Exception& exception, rpc::Exception::Builder builder) {
   // TODO(someday):  Indicate the remote server name as part of the stack trace.  Maybe even
   //   transmit stack traces?
-  builder.setReason(exception.getDescription());
+
+  kj::StringPtr description = exception.getDescription();
+
+  // Include context, if any.
+  kj::Vector<kj::String> contextLines;
+  for (auto context = exception.getContext();;) {
+    KJ_IF_MAYBE(c, context) {
+      contextLines.add(kj::str("context: ", c->file, ": ", c->line, ": ", c->description));
+      context = c->next;
+    } else {
+      break;
+    }
+  }
+  kj::String scratch;
+  if (contextLines.size() > 0) {
+    scratch = kj::str(description, '\n', kj::strArray(contextLines, "\n"));
+    description = scratch;
+  }
+
+  builder.setReason(description);
   builder.setType(static_cast<rpc::Exception::Type>(exception.getType()));
 
   if (exception.getType() == kj::Exception::Type::FAILED &&
@@ -428,6 +447,9 @@ private:
 
     bool isTailCall = false;
     // Is this a tail call?  If so, we don't expect to receive results in the `Return`.
+
+    bool skipFinish = false;
+    // If true, don't send a Finish message.
 
     inline bool operator==(decltype(nullptr)) const {
       return !isAwaitingReturn && selfRef == nullptr;
@@ -961,7 +983,7 @@ private:
 
         // Make a promise which resolves to `replacement` as soon as the `Disembargo` comes back.
         auto embargoPromise = paf.promise.then(
-            kj::mvCapture(replacement, [this](kj::Own<ClientHook>&& replacement) {
+            kj::mvCapture(replacement, [](kj::Own<ClientHook>&& replacement) {
               return kj::mv(replacement);
             }));
 
@@ -1312,7 +1334,7 @@ private:
             connectionState->questions.find(id), "Question ID no longer on table?");
 
         // Send the "Finish" message (if the connection is not already broken).
-        if (connectionState->connection.is<Connected>()) {
+        if (connectionState->connection.is<Connected>() && !question.skipFinish) {
           auto message = connectionState->connection.get<Connected>()->newOutgoingMessage(
               messageSizeHint<rpc::Finish>());
           auto builder = message->getBody().getAs<rpc::Message>().initFinish();
@@ -1485,20 +1507,30 @@ private:
       question.paramExports = kj::mv(exports);
       question.isTailCall = isTailCall;
 
-      // Finish and send.
-      callBuilder.setQuestionId(questionId);
-      if (isTailCall) {
-        callBuilder.getSendResultsTo().setYourself();
-      }
-      message->send();
-
-      // Make the result promise.
+      // Make the QuentionRef and result promise.
       SendInternalResult result;
       auto paf = kj::newPromiseAndFulfiller<kj::Promise<kj::Own<RpcResponse>>>();
       result.questionRef = kj::refcounted<QuestionRef>(
           *connectionState, questionId, kj::mv(paf.fulfiller));
       question.selfRef = *result.questionRef;
       result.promise = paf.promise.attach(kj::addRef(*result.questionRef));
+
+      // Finish and send.
+      callBuilder.setQuestionId(questionId);
+      if (isTailCall) {
+        callBuilder.getSendResultsTo().setYourself();
+      }
+      KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+        KJ_CONTEXT("sending RPC call",
+           callBuilder.getInterfaceId(), callBuilder.getMethodId());
+        message->send();
+      })) {
+        // We can't safely throw the exception from here since we've already modified the question
+        // table state. We'll have to reject the promise instead.
+        question.isAwaitingReturn = false;
+        question.skipFinish = true;
+        result.questionRef->reject(kj::mv(*exception));
+      }
 
       // Send and return.
       return kj::mv(result);
@@ -1716,9 +1748,12 @@ private:
                    kj::Own<IncomingRpcMessage>&& request,
                    kj::Array<kj::Maybe<kj::Own<ClientHook>>> capTableArray,
                    const AnyPointer::Reader& params,
-                   bool redirectResults, kj::Own<kj::PromiseFulfiller<void>>&& cancelFulfiller)
+                   bool redirectResults, kj::Own<kj::PromiseFulfiller<void>>&& cancelFulfiller,
+                   uint64_t interfaceId, uint16_t methodId)
         : connectionState(kj::addRef(connectionState)),
           answerId(answerId),
+          interfaceId(interfaceId),
+          methodId(methodId),
           requestSize(request->getBody().targetSize().wordCount),
           request(kj::mv(request)),
           paramsCapTable(kj::mv(capTableArray)),
@@ -1784,7 +1819,17 @@ private:
         returnMessage.setAnswerId(answerId);
         returnMessage.setReleaseParamCaps(false);
 
-        auto exports = kj::downcast<RpcServerResponseImpl>(*KJ_ASSERT_NONNULL(response)).send();
+        kj::Maybe<kj::Array<ExportId>> exports;
+        KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+          // Debug info incase send() fails due to overside message.
+          KJ_CONTEXT("returning from RPC call", interfaceId, methodId);
+          exports = kj::downcast<RpcServerResponseImpl>(*KJ_ASSERT_NONNULL(response)).send();
+        })) {
+          responseSent = false;
+          sendErrorReturn(kj::mv(*exception));
+          return;
+        }
+
         KJ_IF_MAYBE(e, exports) {
           // Caps were returned, so we can't free the pipeline yet.
           cleanupAnswerTable(kj::mv(*e), false);
@@ -1935,6 +1980,10 @@ private:
   private:
     kj::Own<RpcConnectionState> connectionState;
     AnswerId answerId;
+
+    uint64_t interfaceId;
+    uint16_t methodId;
+    // For debugging.
 
     // Request ---------------------------------------------
 
@@ -2224,7 +2273,7 @@ private:
 
     // Add the answer to the answer table for pipelining and send the response.
     auto& answer = answers[answerId];
-    KJ_REQUIRE(!answer.active, "questionId is already in use") {
+    KJ_REQUIRE(!answer.active, "questionId is already in use", answerId) {
       return;
     }
 
@@ -2265,7 +2314,8 @@ private:
 
     auto context = kj::refcounted<RpcCallContext>(
         *this, answerId, kj::mv(message), kj::mv(capTableArray), payload.getContent(),
-        redirectResults, kj::mv(cancelPaf.fulfiller));
+        redirectResults, kj::mv(cancelPaf.fulfiller),
+        call.getInterfaceId(), call.getMethodId());
 
     // No more using `call` after this point, as it now belongs to the context.
 
@@ -2317,7 +2367,7 @@ private:
               contextPtr->sendReturn();
             }, [contextPtr](kj::Exception&& exception) {
               contextPtr->sendErrorReturn(kj::mv(exception));
-            }).then([]() {}, [&](kj::Exception&& exception) {
+            }).catch_([&](kj::Exception&& exception) {
               // Handle exceptions that occur in sendReturn()/sendErrorReturn().
               taskFailed(kj::mv(exception));
             }).attach(kj::mv(context))

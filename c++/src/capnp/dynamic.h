@@ -214,6 +214,7 @@ private:
 
   inline Reader(StructSchema schema, _::StructReader reader)
       : schema(schema), reader(reader) {}
+  Reader(StructSchema schema, const _::OrphanBuilder& orphan);
 
   bool isSetInUnion(StructSchema::Field field) const;
   void verifySetInUnion(StructSchema::Field field) const;
@@ -305,6 +306,7 @@ private:
 
   inline Builder(StructSchema schema, _::StructBuilder builder)
       : schema(schema), builder(builder) {}
+  Builder(StructSchema schema, _::OrphanBuilder& orphan);
 
   bool isSetInUnion(StructSchema::Field field);
   void verifySetInUnion(StructSchema::Field field);
@@ -369,7 +371,7 @@ public:
 
   inline ListSchema getSchema() const { return schema; }
 
-  inline uint size() const { return reader.size() / ELEMENTS; }
+  inline uint size() const { return unbound(reader.size() / ELEMENTS); }
   DynamicValue::Reader operator[](uint index) const;
 
   typedef _::IndexingIterator<const Reader, DynamicValue::Reader> Iterator;
@@ -381,6 +383,7 @@ private:
   _::ListReader reader;
 
   Reader(ListSchema schema, _::ListReader reader): schema(schema), reader(reader) {}
+  Reader(ListSchema schema, const _::OrphanBuilder& orphan);
 
   template <typename T, Kind k>
   friend struct _::PointerHelpers;
@@ -411,7 +414,7 @@ public:
 
   inline ListSchema getSchema() const { return schema; }
 
-  inline uint size() const { return builder.size() / ELEMENTS; }
+  inline uint size() const { return unbound(builder.size() / ELEMENTS); }
   DynamicValue::Builder operator[](uint index);
   void set(uint index, const DynamicValue::Reader& value);
   DynamicValue::Builder init(uint index, uint size);
@@ -431,6 +434,7 @@ private:
   _::ListBuilder builder;
 
   Builder(ListSchema schema, _::ListBuilder builder): schema(schema), builder(builder) {}
+  Builder(ListSchema schema, _::OrphanBuilder& orphan);
 
   template <typename T, Kind k>
   friend struct _::PointerHelpers;
@@ -634,6 +638,7 @@ public:
   // - DynamicEnum:  Returns the corresponding type.
   // - DynamicStruct, DynamicList:  Returns the corresponding Reader.
   // - Any capability type, including DynamicCapability:  Returns the corresponding Client.
+  // - DynamicValue:  Returns an identical Reader. Useful to avoid special-casing in generic code.
   //   (TODO(perf):  On GCC 4.8 / Clang 3.3, provide rvalue-qualified version that avoids
   //   refcounting.)
   //
@@ -1185,26 +1190,48 @@ inline Orphan<T> AnyPointer::Builder::disownAs(InterfaceSchema schema) {
   return _::PointerHelpers<T>::disown(builder, schema);
 }
 
+// We have to declare the methods below inline because Clang and GCC disagree about how to mangle
+// their symbol names.
 template <>
-DynamicStruct::Builder Orphan<AnyPointer>::getAs<DynamicStruct>(StructSchema schema);
+inline DynamicStruct::Builder Orphan<AnyPointer>::getAs<DynamicStruct>(StructSchema schema) {
+  return DynamicStruct::Builder(schema, builder);
+}
 template <>
-DynamicList::Builder Orphan<AnyPointer>::getAs<DynamicList>(ListSchema schema);
+inline DynamicStruct::Reader Orphan<AnyPointer>::getAsReader<DynamicStruct>(
+    StructSchema schema) const {
+  return DynamicStruct::Reader(schema, builder);
+}
 template <>
-DynamicCapability::Client Orphan<AnyPointer>::getAs<DynamicCapability>(InterfaceSchema schema);
+inline Orphan<DynamicStruct> Orphan<AnyPointer>::releaseAs<DynamicStruct>(StructSchema schema) {
+  return Orphan<DynamicStruct>(schema, kj::mv(builder));
+}
 template <>
-DynamicStruct::Reader Orphan<AnyPointer>::getAsReader<DynamicStruct>(StructSchema schema) const;
+inline DynamicList::Builder Orphan<AnyPointer>::getAs<DynamicList>(ListSchema schema) {
+  return DynamicList::Builder(schema, builder);
+}
 template <>
-DynamicList::Reader Orphan<AnyPointer>::getAsReader<DynamicList>(ListSchema schema) const;
+inline DynamicList::Reader Orphan<AnyPointer>::getAsReader<DynamicList>(ListSchema schema) const {
+  return DynamicList::Reader(schema, builder);
+}
 template <>
-DynamicCapability::Client Orphan<AnyPointer>::getAsReader<DynamicCapability>(
-    InterfaceSchema schema) const;
+inline Orphan<DynamicList> Orphan<AnyPointer>::releaseAs<DynamicList>(ListSchema schema) {
+  return Orphan<DynamicList>(schema, kj::mv(builder));
+}
 template <>
-Orphan<DynamicStruct> Orphan<AnyPointer>::releaseAs<DynamicStruct>(StructSchema schema);
+inline DynamicCapability::Client Orphan<AnyPointer>::getAs<DynamicCapability>(
+    InterfaceSchema schema) {
+  return DynamicCapability::Client(schema, builder.asCapability());
+}
 template <>
-Orphan<DynamicList> Orphan<AnyPointer>::releaseAs<DynamicList>(ListSchema schema);
+inline DynamicCapability::Client Orphan<AnyPointer>::getAsReader<DynamicCapability>(
+    InterfaceSchema schema) const {
+  return DynamicCapability::Client(schema, builder.asCapability());
+}
 template <>
-Orphan<DynamicCapability> Orphan<AnyPointer>::releaseAs<DynamicCapability>(
-    InterfaceSchema schema);
+inline Orphan<DynamicCapability> Orphan<AnyPointer>::releaseAs<DynamicCapability>(
+    InterfaceSchema schema) {
+  return Orphan<DynamicCapability>(schema, kj::mv(builder));
+}
 
 // =======================================================================================
 // Inline implementation details.
@@ -1408,6 +1435,19 @@ struct DynamicValue::Builder::AsImpl<T, Kind::INTERFACE> {
   }
 };
 
+template <>
+struct DynamicValue::Reader::AsImpl<DynamicValue> {
+  static DynamicValue::Reader apply(const Reader& reader) {
+    return reader;
+  }
+};
+template <>
+struct DynamicValue::Builder::AsImpl<DynamicValue> {
+  static DynamicValue::Builder apply(Builder& builder) {
+    return builder;
+  }
+};
+
 inline DynamicValue::Pipeline::Pipeline(std::nullptr_t n): type(UNKNOWN) {}
 inline DynamicValue::Pipeline::Pipeline(DynamicStruct::Pipeline&& value)
     : type(STRUCT), structValue(kj::mv(value)) {}
@@ -1508,6 +1548,16 @@ inline DynamicList::Reader DynamicList::Reader::as<DynamicList>() const {
 template <>
 inline DynamicList::Builder DynamicList::Builder::as<DynamicList>() {
   return *this;
+}
+
+template <>
+inline AnyList::Reader DynamicList::Reader::as<AnyList>() const {
+  return AnyList::Reader(reader);
+}
+
+template <>
+inline AnyList::Builder DynamicList::Builder::as<AnyList>() {
+  return AnyList::Builder(builder);
 }
 
 // -------------------------------------------------------------------

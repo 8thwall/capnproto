@@ -40,25 +40,26 @@ bool isHex(const char *s) {
 }
 
 long long parseSigned(const StringPtr& s, long long min, long long max) {
-  KJ_REQUIRE(s != nullptr, "String does not contain valid number", s);
+  KJ_REQUIRE(s != nullptr, "String does not contain valid number", s) { return 0; }
   char *endPtr;
   errno = 0;
   auto value = strtoll(s.begin(), &endPtr, isHex(s.cStr()) ? 16 : 10);
-  KJ_REQUIRE(endPtr == s.end(), "String does not contain valid number", s);
-  KJ_REQUIRE(errno != ERANGE, "Value out-of-range", s);
-  KJ_REQUIRE(value >= min && value <= max, "Value out-of-range", value, min, max);
+  KJ_REQUIRE(endPtr == s.end(), "String does not contain valid number", s) { return 0; }
+  KJ_REQUIRE(errno != ERANGE, "Value out-of-range", s) { return 0; }
+  KJ_REQUIRE(value >= min && value <= max, "Value out-of-range", value, min, max) { return 0; }
   return value;
 }
 
 unsigned long long parseUnsigned(const StringPtr& s, unsigned long long max) {
-  KJ_REQUIRE(s != nullptr, "String does not contain valid number", s);
+  KJ_REQUIRE(s != nullptr, "String does not contain valid number", s) { return 0; }
   char *endPtr;
   errno = 0;
   auto value = strtoull(s.begin(), &endPtr, isHex(s.cStr()) ? 16 : 10);
-  KJ_REQUIRE(endPtr == s.end(), "String does not contain valid number", s);
-  KJ_REQUIRE(errno != ERANGE, "Value out-of-range", s);
-  KJ_REQUIRE(value <= max, "Value out-of-range", value, max);
-  KJ_REQUIRE(s[0] != '-', "Value out-of-range", s); //strtoull("-1") does not fail with ERANGE
+  KJ_REQUIRE(endPtr == s.end(), "String does not contain valid number", s) { return 0; }
+  KJ_REQUIRE(errno != ERANGE, "Value out-of-range", s) { return 0; }
+  KJ_REQUIRE(value <= max, "Value out-of-range", value, max) { return 0; }
+  //strtoull("-1") does not fail with ERANGE
+  KJ_REQUIRE(s[0] != '-', "Value out-of-range", s) { return 0; }
   return value;
 }
 
@@ -75,11 +76,11 @@ T parseInteger(const StringPtr& s) {
 }
 
 double parseDouble(const StringPtr& s) {
-  KJ_REQUIRE(s != nullptr, "String does not contain valid number", s);
+  KJ_REQUIRE(s != nullptr, "String does not contain valid number", s) { return 0; }
   char *endPtr;
   errno = 0;
   auto value = strtod(s.begin(), &endPtr);
-  KJ_REQUIRE(endPtr == s.end(), "String does not contain valid floating number", s);
+  KJ_REQUIRE(endPtr == s.end(), "String does not contain valid floating number", s) { return 0; }
   return value;
 }
 
@@ -293,12 +294,24 @@ void RemoveE0(char* buffer) {
   // Remove redundant leading 0's after an e, e.g. 1e012. Seems to appear on
   // Windows.
 
-  for (;;) {
-    buffer = strstr(buffer, "e0");
-    if (buffer == NULL || buffer[2] < '0' || buffer[2] > '9') {
-      return;
-    }
-    memmove(buffer + 1, buffer + 2, strlen(buffer + 2) + 1);
+  // Find and skip 'e'.
+  char* ptr = strchr(buffer, 'e');
+  if (ptr == nullptr) return;
+  ++ptr;
+
+  // Skip '-'.
+  if (*ptr == '-') ++ptr;
+
+  // Skip '0's.
+  char* ptr2 = ptr;
+  while (*ptr2 == '0') ++ptr2;
+
+  // If we went past the last digit, back up one.
+  if (*ptr2 < '0' || *ptr2 > '9') --ptr2;
+
+  // Move bytes backwards.
+  if (ptr2 > ptr) {
+    memmove(ptr, ptr2, strlen(ptr2) + 1);
   }
 }
 #endif
@@ -398,6 +411,9 @@ char* FloatToBuffer(float value, char* buffer) {
 
   DelocalizeRadix(buffer);
   RemovePlus(buffer);
+#if _WIN32
+  RemoveE0(buffer);
+#endif // _WIN32
   return buffer;
 }
 

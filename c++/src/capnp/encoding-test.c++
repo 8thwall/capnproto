@@ -591,6 +591,25 @@ TEST(Encoding, SetListToEmpty) {
 #undef CHECK_EMPTY_NONNULL
 }
 
+#if CAPNP_EXPENSIVE_TESTS
+TEST(Encoding, LongList) {
+  // This test allocates 512MB of contiguous memory and takes several seconds, so we usually don't
+  // run it. It is run before release, though.
+
+  MallocMessageBuilder builder;
+
+  auto root = builder.initRoot<TestAllTypes>();
+  uint length = 1 << 27;
+  auto list = root.initUInt64List(length);
+  for (uint ii = 0; ii < length; ++ii) {
+    list.set(ii, ii);
+  }
+  for (uint ii = 0; ii < length; ++ii) {
+    ASSERT_EQ(list[ii], ii);
+  }
+}
+#endif
+
 // =======================================================================================
 
 TEST(Encoding, ListUpgrade) {
@@ -1640,6 +1659,16 @@ TEST(Encoding, Constants) {
   checkList(*test::TestConstants::ENUM_LIST_CONST, {TestEnum::FOO, TestEnum::GARPLY});
 }
 
+TEST(Encoding, AnyPointerConstants) {
+  auto reader = test::ANY_POINTER_CONSTANTS.get();
+
+  EXPECT_EQ("baz", reader.getAnyKindAsStruct().getAs<TestAllTypes>().getTextField());
+  EXPECT_EQ("baz", reader.getAnyStructAsStruct().as<TestAllTypes>().getTextField());
+
+  EXPECT_EQ(111111111, reader.getAnyKindAsList().getAs<List<int32_t>>()[0]);
+  EXPECT_EQ(111111111, reader.getAnyListAsList().as<List<int32_t>>()[0]);
+}
+
 TEST(Encoding, GlobalConstants) {
   EXPECT_EQ(12345u, test::GLOBAL_INT);
   EXPECT_EQ("foobar", test::GLOBAL_TEXT.get());
@@ -1674,7 +1703,7 @@ TEST(Encoding, Embeds) {
     auto root = builder.getRoot<TestAllTypes>();
     initTestMessage(root);
     kj::StringPtr text = test::EMBEDDED_TEXT;
-    EXPECT_EQ(kj::str(root, '\n').size(), text.size());
+    EXPECT_EQ(kj::str(root, text.endsWith("\r\n") ? "\r\n" : "\n"), text);
   }
 
 #endif // CAPNP_LITE
@@ -1889,6 +1918,15 @@ TEST(Encoding, UnionInGenerics) {
   reader.getUg();
   builder.getUg();
   builder.initUg();
+}
+
+TEST(Encoding, DefaultListBuilder) {
+  // At one point, this wouldn't compile.
+
+  List<int>::Builder(nullptr);
+  List<TestAllTypes>::Builder(nullptr);
+  List<List<int>>::Builder(nullptr);
+  List<Text>::Builder(nullptr);
 }
 
 }  // namespace

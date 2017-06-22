@@ -32,15 +32,24 @@ namespace capnp {
 namespace _ {  // private
 namespace {
 
-struct SkipTestHack {
-  SkipTestHack() {
-    if (getenv("CAPNP_SKIP_FUZZ_TEST") != nullptr) {
-      char message[] = "Skipping test because CAPNP_SKIP_FUZZ_TEST is set in environment.\n";
-      write(STDOUT_FILENO, message, sizeof(message));
-      _exit(0);
-    }
+bool skipFuzzTest() {
+  if (getenv("CAPNP_SKIP_FUZZ_TEST") != nullptr) {
+    KJ_LOG(WARNING, "Skipping test because CAPNP_SKIP_FUZZ_TEST is set in environment.");
+    return true;
+  } else {
+    return false;
   }
-} skipTestHack;
+}
+
+class DisableStackTraces: public kj::ExceptionCallback {
+  // This test generates a lot of exceptions. Performing a backtrace on each one can be slow,
+  // especially on Windows (where it is very, very slow). So, disable them.
+
+public:
+  StackTraceMode stackTraceMode() override {
+    return StackTraceMode::NONE;
+  }
+};
 
 uint64_t traverse(AnyPointer::Reader reader);
 uint64_t traverse(AnyStruct::Reader reader);
@@ -101,19 +110,19 @@ void traverseCatchingExceptions(kj::ArrayPtr<const word> data) {
   // Try traversing through Checker.
   kj::runCatchingExceptions([&]() {
     FlatArrayMessageReader reader(data);
-    KJ_ASSERT(Checker::check(reader) != 0);
+    KJ_ASSERT(Checker::check(reader) != 0) { break; }
   });
 
   // Try traversing through AnyPointer.
   kj::runCatchingExceptions([&]() {
     FlatArrayMessageReader reader(data);
-    KJ_ASSERT(traverse(reader.getRoot<AnyPointer>()) != 0);
+    KJ_ASSERT(traverse(reader.getRoot<AnyPointer>()) != 0) { break; }
   });
 
   // Try counting the size..
   kj::runCatchingExceptions([&]() {
     FlatArrayMessageReader reader(data);
-    KJ_ASSERT(reader.getRoot<AnyPointer>().targetSize().wordCount != 0);
+    KJ_ASSERT(reader.getRoot<AnyPointer>().targetSize().wordCount != 0) { break; }
   });
 
   // Try copying into a builder, and if that works, traversing it with Checker.
@@ -122,7 +131,7 @@ void traverseCatchingExceptions(kj::ArrayPtr<const word> data) {
     FlatArrayMessageReader reader(data);
     MallocMessageBuilder copyBuilder(buffer);
     copyBuilder.setRoot(reader.getRoot<AnyPointer>());
-    KJ_ASSERT(Checker::check(copyBuilder) != 0);
+    KJ_ASSERT(Checker::check(copyBuilder) != 0) { break; }
   });
 }
 
@@ -157,6 +166,9 @@ struct StructChecker {
 };
 
 KJ_TEST("fuzz-test struct pointer") {
+  if (skipFuzzTest()) return;
+  DisableStackTraces disableStackTraces;
+
   MallocMessageBuilder builder;
   builder.getRoot<TestAllTypes>().setTextField("foo");
   KJ_ASSERT(builder.getSegmentsForOutput().size() == 1);
@@ -175,6 +187,9 @@ struct ListChecker {
 };
 
 KJ_TEST("fuzz-test list pointer") {
+  if (skipFuzzTest()) return;
+  DisableStackTraces disableStackTraces;
+
   MallocMessageBuilder builder;
   auto list = builder.getRoot<AnyPointer>().initAs<List<uint32_t>>(2);
   list.set(0, 12345);
@@ -197,6 +212,9 @@ struct StructListChecker {
 };
 
 KJ_TEST("fuzz-test struct list pointer") {
+  if (skipFuzzTest()) return;
+  DisableStackTraces disableStackTraces;
+
   MallocMessageBuilder builder;
   auto list = builder.getRoot<AnyPointer>().initAs<List<test::TestAllTypes>>(2);
   list[0].setTextField("foo");
@@ -218,12 +236,18 @@ struct TextChecker {
 };
 
 KJ_TEST("fuzz-test text pointer") {
+  if (skipFuzzTest()) return;
+  DisableStackTraces disableStackTraces;
+
   MallocMessageBuilder builder;
   builder.template getRoot<AnyPointer>().setAs<Text>("foo");
   fuzz<TextChecker>(messageToFlatArray(builder), 2, 64, 192);
 }
 
 KJ_TEST("fuzz-test far pointer") {
+  if (skipFuzzTest()) return;
+  DisableStackTraces disableStackTraces;
+
   MallocMessageBuilder builder(1, AllocationStrategy::FIXED_SIZE);
   initTestMessage(builder.getRoot<TestAllTypes>());
 
@@ -235,6 +259,9 @@ KJ_TEST("fuzz-test far pointer") {
 }
 
 KJ_TEST("fuzz-test double-far pointer") {
+  if (skipFuzzTest()) return;
+  DisableStackTraces disableStackTraces;
+
   MallocMessageBuilder builder(1, AllocationStrategy::FIXED_SIZE);
 
   // Carefully arrange for a double-far pointer to be created.

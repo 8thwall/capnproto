@@ -235,6 +235,15 @@ TEST(Any, AnyStructListCapInSchema) {
     AnyStruct::Builder anyStruct = root.getAnyStructField();
     checkTestMessage(anyStruct.as<TestAllTypes>());
     checkTestMessage(anyStruct.asReader().as<TestAllTypes>());
+
+    EXPECT_TRUE(root.hasAnyStructField());
+    auto orphan = root.disownAnyStructField();
+    checkTestMessage(orphan.getReader().as<TestAllTypes>());
+    EXPECT_FALSE(root.hasAnyStructField());
+
+    root.adoptAnyStructField(kj::mv(orphan));
+    EXPECT_TRUE(root.hasAnyStructField());
+    checkTestMessage(root.getAnyStructField().as<TestAllTypes>());
   }
 
   {
@@ -245,9 +254,18 @@ TEST(Any, AnyStructListCapInSchema) {
 
     AnyList::Builder anyList = root.getAnyListField();
     checkList(anyList.as<List<int>>(), {123, 456, 789});
+
+    EXPECT_TRUE(root.hasAnyListField());
+    auto orphan = root.disownAnyListField();
+    checkList(orphan.getReader().as<List<int>>(), {123, 456, 789});
+    EXPECT_FALSE(root.hasAnyListField());
+
+    root.adoptAnyListField(kj::mv(orphan));
+    EXPECT_TRUE(root.hasAnyListField());
+    checkList(root.getAnyListField().as<List<int>>(), {123, 456, 789});
   }
 
-  #if !CAPNP_LITE
+#if !CAPNP_LITE
   // This portion of the test relies on a Client, not present in lite-mode.
   {
     kj::EventLoop loop;
@@ -261,10 +279,30 @@ TEST(Any, AnyStructListCapInSchema) {
     req.send().wait(waitScope);
     EXPECT_EQ(1, callCount);
   }
-  #endif
+#endif
 }
 
+KJ_TEST("Builder::isStruct() does not corrupt segment pointer") {
+  MallocMessageBuilder builder(1); // small first segment
+  auto root = builder.getRoot<AnyPointer>();
 
+  // Do a lot of allocations so that there is likely a segment with a decent
+  // amount of free space.
+  initTestMessage(root.initAs<test::TestAllTypes>());
+
+  // This will probably get allocated in a segment that still has room for the
+  // Data allocation below.
+  root.initAs<test::TestAllTypes>();
+
+  // At one point, this caused root.builder.segment to point to the segment
+  // where the struct is allocated, rather than segment where the root pointer
+  // lives, i.e. segment zero.
+  EXPECT_TRUE(root.isStruct());
+
+  // If root.builder.segment points to the wrong segment and that segment has free
+  // space, then this triggers a DREQUIRE failure in WirePointer::setKindAndTarget().
+  root.initAs<Data>(1);
+}
 
 TEST(Any, Equals) {
   MallocMessageBuilder builderA;
@@ -314,6 +352,86 @@ TEST(Any, Equals) {
 
   rootA.getStructList()[1].setTextField("my NEW structlist 2");
   EXPECT_EQ(Equality::EQUAL, anyA.equals(anyB));
+}
+
+KJ_TEST("Bit list with nonzero pad bits") {
+  AlignedData<2> segment1 = {{
+      0x01, 0x00, 0x00, 0x00, 0x59, 0x00, 0x00, 0x00, // eleven bit-sized elements
+      0xee, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // twelfth bit is set!
+  }};
+  kj::ArrayPtr<const word> segments1[1] = {
+    kj::arrayPtr(segment1.words, 2)
+  };
+  SegmentArrayMessageReader message1(kj::arrayPtr(segments1, 1));
+
+  AlignedData<2> segment2 = {{
+      0x01, 0x00, 0x00, 0x00, 0x59, 0x00, 0x00, 0x00, // eleven bit-sized elements
+      0xee, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // twelfth bit is not set
+  }};
+  kj::ArrayPtr<const word> segments2[1] = {
+    kj::arrayPtr(segment2.words, 2)
+  };
+  SegmentArrayMessageReader message2(kj::arrayPtr(segments2, 1));
+
+  // Should be equal, despite nonzero padding.
+  KJ_ASSERT(message1.getRoot<AnyList>() == message2.getRoot<AnyList>());
+}
+
+KJ_TEST("Pointer list unequal to struct list") {
+  AlignedData<1> segment1 = {{
+      // list with zero pointer-sized elements
+      0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+  }};
+  kj::ArrayPtr<const word> segments1[1] = {
+    kj::arrayPtr(segment1.words, 1)
+  };
+  SegmentArrayMessageReader message1(kj::arrayPtr(segments1, 1));
+
+  AlignedData<2> segment2 = {{
+      // struct list of length zero
+      0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
+
+      // struct list tag, zero elements
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  }};
+  kj::ArrayPtr<const word> segments2[1] = {
+    kj::arrayPtr(segment2.words, 2)
+  };
+  SegmentArrayMessageReader message2(kj::arrayPtr(segments2, 1));
+
+  EXPECT_EQ(Equality::NOT_EQUAL, message1.getRoot<AnyList>().equals(message2.getRoot<AnyList>()));
+}
+
+KJ_TEST("Truncating non-null pointer fields does not preserve equality") {
+  AlignedData<3> segment1 = {{
+      // list with one data word and one pointer field
+      0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+
+      // data word
+      0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
+
+      // non-null pointer to zero-sized struct
+      0xfc, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+  }};
+  kj::ArrayPtr<const word> segments1[1] = {
+    kj::arrayPtr(segment1.words, 3)
+  };
+  SegmentArrayMessageReader message1(kj::arrayPtr(segments1, 1));
+
+  AlignedData<2> segment2 = {{
+      // list with one data word and zero pointers
+      0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+
+      // data word
+      0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
+  }};
+  kj::ArrayPtr<const word> segments2[1] = {
+    kj::arrayPtr(segment2.words, 2)
+  };
+  SegmentArrayMessageReader message2(kj::arrayPtr(segments2, 1));
+
+  EXPECT_EQ(Equality::NOT_EQUAL,
+            message1.getRoot<AnyPointer>().equals(message2.getRoot<AnyPointer>()));
 }
 
 }  // namespace

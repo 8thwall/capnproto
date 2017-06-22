@@ -24,16 +24,32 @@
 #include <kj/debug.h>
 #include <kj/thread.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/types.h>
-#include <sys/socket.h>
+#include <kj/miniposix.h>
 #include "test-util.h"
 #include <kj/compat/gtest.h>
+
+#if _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <kj/windows-sanity.h>
+namespace kj {
+  namespace _ {
+    int win32Socketpair(SOCKET socks[2]);
+  }
+}
+#else
+#include <sys/socket.h>
+#endif
 
 namespace capnp {
 namespace _ {  // private
 namespace {
+
+#if _WIN32
+inline void delay() { Sleep(5); }
+#else
+inline void delay() { usleep(5000); }
+#endif
 
 class FragmentingOutputStream: public kj::OutputStream {
 public:
@@ -41,7 +57,7 @@ public:
 
   void write(const void* buffer, size_t size) override {
     while (size > 0) {
-      usleep(5000);
+      delay();
       size_t n = rand() % size + 1;
       inner.write(buffer, n);
       buffer = reinterpret_cast<const byte*>(buffer) + n;
@@ -86,11 +102,21 @@ private:
 
 class PipeWithSmallBuffer {
 public:
+#ifdef _WIN32
+#define KJ_SOCKCALL KJ_WINSOCK
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
+#define socketpair(family, type, flags, fds) kj::_::win32Socketpair(fds)
+#else
+#define KJ_SOCKCALL KJ_SYSCALL
+#endif
+
   PipeWithSmallBuffer() {
     // Use a socketpair rather than a pipe so that we can set the buffer size extremely small.
-    KJ_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    KJ_SOCKCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
 
-    KJ_SYSCALL(shutdown(fds[0], SHUT_WR));
+    KJ_SOCKCALL(shutdown(fds[0], SHUT_WR));
     // Note:  OSX reports ENOTCONN if we also try to shutdown(fds[1], SHUT_RD).
 
     // Request that the buffer size be as small as possible, to force the event loop to kick in.
@@ -102,29 +128,90 @@ public:
     //   chains.
     // - Cygwin will apparently actually use a buffer size of 0 and therefore block forever waiting
     //   for buffer space.
+    // - GNU HURD throws ENOPROTOOPT for SO_RCVBUF. Apparently, technically, a Unix domain socket
+    //   has only one buffer, and it's controlled via SO_SNDBUF on the other end. OK, we'll ignore
+    //   errors on SO_RCVBUF, then.
     //
     // Anyway, we now use 127 to avoid these issues (but also to screw around with non-word-boundary
     // writes).
     uint small = 127;
-    KJ_SYSCALL(setsockopt(fds[0], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small)));
-    KJ_SYSCALL(setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small)));
+    setsockopt(fds[0], SOL_SOCKET, SO_RCVBUF, (const char*)&small, sizeof(small));
+    KJ_SOCKCALL(setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, (const char*)&small, sizeof(small)));
   }
   ~PipeWithSmallBuffer() {
+#if _WIN32
+    closesocket(fds[0]);
+    closesocket(fds[1]);
+#else
     close(fds[0]);
     close(fds[1]);
+#endif
   }
 
   inline int operator[](uint index) { return fds[index]; }
 
 private:
+#ifdef _WIN32
+  SOCKET fds[2];
+#else
   int fds[2];
+#endif
 };
+
+#if _WIN32
+// Sockets on win32 are not file descriptors. Ugh.
+//
+// TODO(cleanup): Maybe put these somewhere reusable? kj/io.h is inappropriate since we don't
+//   really want to link against winsock.
+
+class SocketOutputStream: public kj::OutputStream {
+public:
+  explicit SocketOutputStream(SOCKET fd): fd(fd) {}
+
+  void write(const void* buffer, size_t size) override {
+    const char* ptr = reinterpret_cast<const char*>(buffer);
+    while (size > 0) {
+      kj::miniposix::ssize_t n;
+      KJ_SOCKCALL(n = send(fd, ptr, size, 0));
+      size -= n;
+      ptr += n;
+    }
+  }
+
+private:
+  SOCKET fd;
+};
+
+class SocketInputStream: public kj::InputStream {
+public:
+  explicit SocketInputStream(SOCKET fd): fd(fd) {}
+
+  size_t tryRead(void* buffer, size_t minBytes, size_t maxBytes) override {
+    char* ptr = reinterpret_cast<char*>(buffer);
+    size_t total = 0;
+    while (total < minBytes) {
+      kj::miniposix::ssize_t n;
+      KJ_SOCKCALL(n = recv(fd, ptr, maxBytes, 0));
+      total += n;
+      maxBytes -= n;
+      ptr += n;
+    }
+    return total;
+  }
+
+private:
+  SOCKET fd;
+};
+#else  // _WIN32
+typedef kj::FdOutputStream SocketOutputStream;
+typedef kj::FdInputStream SocketInputStream;
+#endif  // _WIN32, else
 
 TEST(SerializeAsyncTest, ParseAsync) {
   PipeWithSmallBuffer fds;
   auto ioContext = kj::setupAsyncIo();
   auto input = ioContext.lowLevelProvider->wrapInputFd(fds[0]);
-  kj::FdOutputStream rawOutput(fds[1]);
+  SocketOutputStream rawOutput(fds[1]);
   FragmentingOutputStream output(rawOutput);
 
   TestMessageBuilder message(1);
@@ -143,7 +230,7 @@ TEST(SerializeAsyncTest, ParseAsyncOddSegmentCount) {
   PipeWithSmallBuffer fds;
   auto ioContext = kj::setupAsyncIo();
   auto input = ioContext.lowLevelProvider->wrapInputFd(fds[0]);
-  kj::FdOutputStream rawOutput(fds[1]);
+  SocketOutputStream rawOutput(fds[1]);
   FragmentingOutputStream output(rawOutput);
 
   TestMessageBuilder message(7);
@@ -162,7 +249,7 @@ TEST(SerializeAsyncTest, ParseAsyncEvenSegmentCount) {
   PipeWithSmallBuffer fds;
   auto ioContext = kj::setupAsyncIo();
   auto input = ioContext.lowLevelProvider->wrapInputFd(fds[0]);
-  kj::FdOutputStream rawOutput(fds[1]);
+  SocketOutputStream rawOutput(fds[1]);
   FragmentingOutputStream output(rawOutput);
 
   TestMessageBuilder message(10);
@@ -190,7 +277,8 @@ TEST(SerializeAsyncTest, WriteAsync) {
   }
 
   kj::Thread thread([&]() {
-    StreamFdMessageReader reader(fds[0]);
+    SocketInputStream input(fds[0]);
+    InputStreamMessageReader reader(input);
     auto listReader = reader.getRoot<TestAllTypes>().getStructList();
     EXPECT_EQ(list.size(), listReader.size());
     for (auto element: listReader) {
@@ -214,7 +302,8 @@ TEST(SerializeAsyncTest, WriteAsyncOddSegmentCount) {
   }
 
   kj::Thread thread([&]() {
-    StreamFdMessageReader reader(fds[0]);
+    SocketInputStream input(fds[0]);
+    InputStreamMessageReader reader(input);
     auto listReader = reader.getRoot<TestAllTypes>().getStructList();
     EXPECT_EQ(list.size(), listReader.size());
     for (auto element: listReader) {
@@ -238,7 +327,8 @@ TEST(SerializeAsyncTest, WriteAsyncEvenSegmentCount) {
   }
 
   kj::Thread thread([&]() {
-    StreamFdMessageReader reader(fds[0]);
+    SocketInputStream input(fds[0]);
+    InputStreamMessageReader reader(input);
     auto listReader = reader.getRoot<TestAllTypes>().getStructList();
     EXPECT_EQ(list.size(), listReader.size());
     for (auto element: listReader) {

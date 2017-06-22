@@ -22,7 +22,6 @@
 #include "rpc-twoparty.h"
 #include "test-util.h"
 #include <capnp/rpc.capnp.h>
-#include <kj/async-unix.h>
 #include <kj/debug.h>
 #include <kj/thread.h>
 #include <kj/compat/gtest.h>
@@ -334,6 +333,39 @@ TEST(TwoPartyNetwork, ConvenienceClasses) {
   auto response = request.send().wait(ioContext.waitScope);
   EXPECT_EQ("foo", response.getX());
   EXPECT_EQ(1, callCount);
+}
+
+TEST(TwoPartyNetwork, HugeMessage) {
+  auto ioContext = kj::setupAsyncIo();
+  int callCount = 0;
+  int handleCount = 0;
+
+  auto serverThread = runServer(*ioContext.provider, callCount, handleCount);
+  TwoPartyVatNetwork network(*serverThread.pipe, rpc::twoparty::Side::CLIENT);
+  auto rpcClient = makeRpcClient(network);
+
+  auto client = getPersistentCap(rpcClient, rpc::twoparty::Side::SERVER,
+      test::TestSturdyRefObjectId::Tag::TEST_MORE_STUFF).castAs<test::TestMoreStuff>();
+
+  // Oversized request fails.
+  {
+    auto req = client.methodWithDefaultsRequest();
+    req.initA(100000000);  // 100 MB
+
+    KJ_EXPECT_THROW_RECOVERABLE_MESSAGE("larger than the single-message size limit",
+        req.send().ignoreResult().wait(ioContext.waitScope));
+  }
+
+  // Oversized response fails.
+  KJ_EXPECT_THROW_RECOVERABLE_MESSAGE("larger than the single-message size limit",
+      client.getEnormousStringRequest().send().ignoreResult().wait(ioContext.waitScope));
+
+  // Connection is still up.
+  {
+    auto req = client.getCallSequenceRequest();
+    req.setExpected(0);
+    KJ_EXPECT(req.send().wait(ioContext.waitScope).getN() == 0);
+  }
 }
 
 class TestAuthenticatedBootstrapImpl final

@@ -45,7 +45,7 @@ kj::Own<ClientHook> AnyPointer::Reader::getPipelinedCap(
         break;
 
       case PipelineOp::Type::GET_POINTER_FIELD:
-        pointer = pointer.getStruct(nullptr).getPointerField(op.pointerIndex * POINTERS);
+        pointer = pointer.getStruct(nullptr).getPointerField(bounded(op.pointerIndex) * POINTERS);
         break;
     }
   }
@@ -101,12 +101,25 @@ Equality AnyStruct::Reader::equals(AnyStruct::Reader right) {
   }
 
   auto ptrsL = getPointerSection();
+  size_t ptrsSizeL = ptrsL.size();
+  while (ptrsSizeL > 0 && ptrsL[ptrsSizeL - 1].isNull()) {
+    -- ptrsSizeL;
+  }
+
   auto ptrsR = right.getPointerSection();
+  size_t ptrsSizeR = ptrsR.size();
+  while (ptrsSizeR > 0 && ptrsR[ptrsSizeR - 1].isNull()) {
+    -- ptrsSizeR;
+  }
+
+  if(ptrsSizeL != ptrsSizeR) {
+    return Equality::NOT_EQUAL;
+  }
 
   size_t i = 0;
 
   auto eqResult = Equality::EQUAL;
-  for(; i < kj::min(ptrsL.size(), ptrsR.size()); i++) {
+  for (; i < ptrsSizeL; i++) {
     auto l = ptrsL[i];
     auto r = ptrsR[i];
     switch(l.equals(r)) {
@@ -141,6 +154,11 @@ Equality AnyList::Reader::equals(AnyList::Reader right) {
   if(size() != right.size()) {
     return Equality::NOT_EQUAL;
   }
+
+  if (getElementSize() != right.getElementSize()) {
+    return Equality::NOT_EQUAL;
+  }
+
   auto eqResult = Equality::EQUAL;
   switch(getElementSize()) {
     case ElementSize::VOID:
@@ -148,16 +166,26 @@ Equality AnyList::Reader::equals(AnyList::Reader right) {
     case ElementSize::BYTE:
     case ElementSize::TWO_BYTES:
     case ElementSize::FOUR_BYTES:
-    case ElementSize::EIGHT_BYTES:
-      if(getElementSize() == right.getElementSize()) {
-        if(memcmp(getRawBytes().begin(), right.getRawBytes().begin(), getRawBytes().size()) == 0) {
-          return Equality::EQUAL;
-        } else {
+    case ElementSize::EIGHT_BYTES: {
+      size_t cmpSize = getRawBytes().size();
+
+      if (getElementSize() == ElementSize::BIT && size() % 8 != 0) {
+        // The list does not end on a byte boundary. We need special handling for the final
+        // byte because we only care about the bits that are actually elements of the list.
+
+        uint8_t mask = (1 << (size() % 8)) - 1; // lowest size() bits set
+        if ((getRawBytes()[cmpSize - 1] & mask) != (right.getRawBytes()[cmpSize - 1] & mask)) {
           return Equality::NOT_EQUAL;
         }
+        cmpSize -= 1;
+      }
+
+      if (memcmp(getRawBytes().begin(), right.getRawBytes().begin(), cmpSize) == 0) {
+        return Equality::EQUAL;
       } else {
         return Equality::NOT_EQUAL;
       }
+    }
     case ElementSize::POINTER:
     case ElementSize::INLINE_COMPOSITE: {
       auto llist = as<List<AnyStruct>>();

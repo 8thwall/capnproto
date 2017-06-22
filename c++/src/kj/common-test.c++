@@ -37,6 +37,14 @@ KJ_TEST("kj::size() on native arrays") {
   KJ_EXPECT(expected == 4u);
 }
 
+struct ImplicitToInt {
+  int i;
+
+  operator int() const {
+    return i;
+  }
+};
+
 TEST(Common, Maybe) {
   {
     Maybe<int> m = 123;
@@ -166,6 +174,23 @@ TEST(Common, Maybe) {
       EXPECT_EQ(0, *v);  // avoid unused warning
     }
   }
+
+  {
+    // Test a case where an implicit conversion didn't used to happen correctly.
+    Maybe<ImplicitToInt> m(ImplicitToInt { 123 });
+    Maybe<uint> m2(m);
+    Maybe<uint> m3(kj::mv(m));
+    KJ_IF_MAYBE(v, m2) {
+      EXPECT_EQ(123, *v);
+    } else {
+      ADD_FAILURE();
+    }
+    KJ_IF_MAYBE(v, m3) {
+      EXPECT_EQ(123, *v);
+    } else {
+      ADD_FAILURE();
+    }
+  }
 }
 
 TEST(Common, MaybeConstness) {
@@ -220,13 +245,7 @@ TEST(Common, Downcast) {
 
   EXPECT_EQ(&bar, &downcast<Bar>(foo));
 #if defined(KJ_DEBUG) && !KJ_NO_RTTI
-#if KJ_NO_EXCEPTIONS
-#ifdef KJ_DEBUG
-  EXPECT_DEATH_IF_SUPPORTED(downcast<Baz>(foo), "Value cannot be downcast");
-#endif
-#else
-  EXPECT_ANY_THROW(downcast<Baz>(foo));
-#endif
+  KJ_EXPECT_THROW_MESSAGE("Value cannot be downcast", downcast<Baz>(foo));
 #endif
 
 #if KJ_NO_RTTI
@@ -443,6 +462,20 @@ TEST(Common, ArrayAsBytes) {
       EXPECT_EQ('\xf0', chars[4]);
     }
   }
+}
+
+KJ_TEST("kj::range()") {
+  uint expected = 5;
+  for (uint i: range(5, 10)) {
+    KJ_EXPECT(i == expected++);
+  }
+  KJ_EXPECT(expected == 10);
+
+  expected = 0;
+  for (uint i: range(0, 8)) {
+    KJ_EXPECT(i == expected++);
+  }
+  KJ_EXPECT(expected == 8);
 }
 
 }  // namespace

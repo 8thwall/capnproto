@@ -35,8 +35,14 @@ struct sockaddr;
 
 namespace kj {
 
+#if _WIN32
+class Win32EventPort;
+#else
 class UnixEventPort;
+#endif
+
 class NetworkAddress;
+class AsyncOutputStream;
 
 // =======================================================================================
 // Streaming I/O
@@ -45,18 +51,55 @@ class AsyncInputStream {
   // Asynchronous equivalent of InputStream (from io.h).
 
 public:
-  virtual Promise<size_t> read(void* buffer, size_t minBytes, size_t maxBytes) = 0;
+  virtual Promise<size_t> read(void* buffer, size_t minBytes, size_t maxBytes);
   virtual Promise<size_t> tryRead(void* buffer, size_t minBytes, size_t maxBytes) = 0;
 
   Promise<void> read(void* buffer, size_t bytes);
+
+  virtual Maybe<uint64_t> tryGetLength();
+  // Get the remaining number of bytes that will be produced by this stream, if known.
+  //
+  // This is used e.g. to fill in the Content-Length header of an HTTP message. If unknown, the
+  // HTTP implementation may need to fall back to Transfer-Encoding: chunked.
+  //
+  // The default implementation always returns null.
+
+  virtual Promise<uint64_t> pumpTo(
+      AsyncOutputStream& output, uint64_t amount = kj::maxValue);
+  // Read `amount` bytes from this stream (or to EOF) and write them to `output`, returning the
+  // total bytes actually pumped (which is only less than `amount` if EOF was reached).
+  //
+  // Override this if your stream type knows how to pump itself to certain kinds of output
+  // streams more efficiently than via the naive approach. You can use
+  // kj::dynamicDowncastIfAvailable() to test for stream types you recognize, and if none match,
+  // delegate to the default implementation.
+  //
+  // The default implementation first tries calling output.tryPumpFrom(), but if that fails, it
+  // performs a naive pump by allocating a buffer and reading to it / writing from it in a loop.
+
+  Promise<Array<byte>> readAllBytes();
+  Promise<String> readAllText();
+  // Read until EOF and return as one big byte array or string.
 };
 
 class AsyncOutputStream {
   // Asynchronous equivalent of OutputStream (from io.h).
 
 public:
-  virtual Promise<void> write(const void* buffer, size_t size) = 0;
-  virtual Promise<void> write(ArrayPtr<const ArrayPtr<const byte>> pieces) = 0;
+  virtual Promise<void> write(const void* buffer, size_t size) KJ_WARN_UNUSED_RESULT = 0;
+  virtual Promise<void> write(ArrayPtr<const ArrayPtr<const byte>> pieces)
+      KJ_WARN_UNUSED_RESULT = 0;
+
+  virtual Maybe<Promise<uint64_t>> tryPumpFrom(
+      AsyncInputStream& input, uint64_t amount = kj::maxValue);
+  // Implements double-dispatch for AsyncInputStream::pumpTo().
+  //
+  // This method should only be called from within an implementation of pumpTo().
+  //
+  // This method examines the type of `input` to find optimized ways to pump data from it to this
+  // output stream. If it finds one, it performs the pump. Otherwise, it returns null.
+  //
+  // The default implementation always returns null.
 };
 
 class AsyncIoStream: public AsyncInputStream, public AsyncOutputStream {
@@ -377,6 +420,7 @@ public:
     // If this flag is not used, then the file descriptor is not automatically closed and the
     // close-on-exec flag is not modified.
 
+#if !_WIN32
     ALREADY_CLOEXEC = 1 << 1,
     // Indicates that the close-on-exec flag is known already to be set, so need not be set again.
     // Only relevant when combined with TAKE_OWNERSHIP.
@@ -391,37 +435,48 @@ public:
     //
     // On Linux, all system calls which yield new file descriptors have flags or variants which
     // enable non-blocking mode immediately.  Unfortunately, other OS's do not.
+#endif
   };
 
-  virtual Own<AsyncInputStream> wrapInputFd(int fd, uint flags = 0) = 0;
+#if _WIN32
+  typedef uintptr_t Fd;
+  // On Windows, the `fd` parameter to each of these methods must be a SOCKET, and must have the
+  // flag WSA_FLAG_OVERLAPPED (which socket() uses by default, but WSASocket() wants you to specify
+  // explicitly).
+#else
+  typedef int Fd;
+  // On Unix, any arbitrary file descriptor is supported.
+#endif
+
+  virtual Own<AsyncInputStream> wrapInputFd(Fd fd, uint flags = 0) = 0;
   // Create an AsyncInputStream wrapping a file descriptor.
   //
   // `flags` is a bitwise-OR of the values of the `Flags` enum.
 
-  virtual Own<AsyncOutputStream> wrapOutputFd(int fd, uint flags = 0) = 0;
+  virtual Own<AsyncOutputStream> wrapOutputFd(Fd fd, uint flags = 0) = 0;
   // Create an AsyncOutputStream wrapping a file descriptor.
   //
   // `flags` is a bitwise-OR of the values of the `Flags` enum.
 
-  virtual Own<AsyncIoStream> wrapSocketFd(int fd, uint flags = 0) = 0;
+  virtual Own<AsyncIoStream> wrapSocketFd(Fd fd, uint flags = 0) = 0;
   // Create an AsyncIoStream wrapping a socket file descriptor.
   //
   // `flags` is a bitwise-OR of the values of the `Flags` enum.
 
-  virtual Promise<Own<AsyncIoStream>> wrapConnectingSocketFd(int fd, uint flags = 0) = 0;
-  // Create an AsyncIoStream wrapping a socket that is in the process of connecting.  The returned
-  // promise should not resolve until connection has completed -- traditionally indicated by the
-  // descriptor becoming writable.
+  virtual Promise<Own<AsyncIoStream>> wrapConnectingSocketFd(
+      Fd fd, const struct sockaddr* addr, uint addrlen, uint flags = 0) = 0;
+  // Create an AsyncIoStream wrapping a socket and initiate a connection to the given address.
+  // The returned promise does not resolve until connection has completed.
   //
   // `flags` is a bitwise-OR of the values of the `Flags` enum.
 
-  virtual Own<ConnectionReceiver> wrapListenSocketFd(int fd, uint flags = 0) = 0;
+  virtual Own<ConnectionReceiver> wrapListenSocketFd(Fd fd, uint flags = 0) = 0;
   // Create an AsyncIoStream wrapping a listen socket file descriptor.  This socket should already
   // have had `bind()` and `listen()` called on it, so it's ready for `accept()`.
   //
   // `flags` is a bitwise-OR of the values of the `Flags` enum.
 
-  virtual Own<DatagramPort> wrapDatagramSocketFd(int fd, uint flags = 0);
+  virtual Own<DatagramPort> wrapDatagramSocketFd(Fd fd, uint flags = 0);
 
   virtual Timer& getTimer() = 0;
   // Returns a `Timer` based on real time.  Time does not pass while event handlers are running --
@@ -440,9 +495,13 @@ struct AsyncIoContext {
   Own<AsyncIoProvider> provider;
   WaitScope& waitScope;
 
+#if _WIN32
+  Win32EventPort& win32EventPort;
+#else
   UnixEventPort& unixEventPort;
   // TEMPORARY: Direct access to underlying UnixEventPort, mainly for waiting on signals. This
   //   field will go away at some point when we have a chance to improve these interfaces.
+#endif
 };
 
 AsyncIoContext setupAsyncIo();

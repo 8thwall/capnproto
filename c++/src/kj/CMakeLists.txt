@@ -13,6 +13,7 @@ set(kj_sources_lite
   thread.c++
   main.c++
   arena.c++
+  test-helpers.c++
 )
 set(kj_sources_heavy
   units.c++
@@ -58,6 +59,9 @@ set(kj-std_headers
 )
 add_library(kj ${kj_sources})
 add_library(CapnProto::kj ALIAS kj)
+target_compile_features(kj PUBLIC cxx_constexpr)
+# Requiring the cxx_std_11 metafeature would be preferable, but that doesn't exist until CMake 3.8.
+
 if(UNIX AND NOT ANDROID)
   target_link_libraries(kj PUBLIC pthread)
 endif()
@@ -84,7 +88,7 @@ set(kj-test-compat_headers
 )
 add_library(kj-test ${kj-test_sources})
 add_library(CapnProto::kj-test ALIAS kj-test)
-target_link_libraries(kj-test kj)
+target_link_libraries(kj-test PUBLIC kj)
 install(TARGETS kj-test ${INSTALL_TARGETS_DEFAULT_ARGS})
 install(FILES ${kj-test_headers} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/kj")
 install(FILES ${kj-test-compat_headers} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/kj/compat")
@@ -92,7 +96,10 @@ install(FILES ${kj-test-compat_headers} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}
 set(kj-async_sources
   async.c++
   async-unix.c++
+  async-win32.c++
+  async-io-win32.c++
   async-io.c++
+  async-io-unix.c++
   time.c++
 )
 set(kj-async_headers
@@ -100,19 +107,38 @@ set(kj-async_headers
   async.h
   async-inl.h
   async-unix.h
+  async-win32.h
   async-io.h
   time.h
 )
 if(NOT CAPNP_LITE)
   add_library(kj-async ${kj-async_sources})
   add_library(CapnProto::kj-async ALIAS kj-async)
-  target_link_libraries(kj-async kj)
+  target_link_libraries(kj-async PUBLIC kj)
   if(UNIX)
     # external clients of this library need to link to pthreads
     target_compile_options(kj-async INTERFACE "-pthread")
+  elseif(WIN32)
+    target_link_libraries(kj-async PUBLIC ws2_32)
   endif()
   install(TARGETS kj-async ${INSTALL_TARGETS_DEFAULT_ARGS})
   install(FILES ${kj-async_headers} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/kj")
+endif()
+
+# kj-http ======================================================================
+
+set(kj-http_sources
+  compat/http.c++
+)
+set(kj-http_headers
+  compat/http.h
+)
+if(NOT CAPNP_LITE)
+  add_library(kj-http ${kj-http_sources})
+  add_library(CapnProto::kj-http ALIAS kj-http)
+  target_link_libraries(kj-http PUBLIC kj-async kj)
+  install(TARGETS kj-http ${INSTALL_TARGETS_DEFAULT_ARGS})
+  install(FILES ${kj-http_headers} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/kj/compat")
 endif()
 
 # Tests ========================================================================
@@ -140,6 +166,7 @@ if(BUILD_TESTING)
     add_executable(kj-heavy-tests
       async-test.c++
       async-unix-test.c++
+      async-win32-test.c++
       async-io-test.c++
       refcount-test.c++
       string-tree-test.c++
@@ -151,8 +178,9 @@ if(BUILD_TESTING)
       threadlocal-pthread-test.c++
       parse/common-test.c++
       parse/char-test.c++
+      compat/http-test.c++
     )
-    target_link_libraries(kj-heavy-tests kj-async kj-test kj)
+    target_link_libraries(kj-heavy-tests kj-http kj-async kj-test kj)
     add_dependencies(check kj-heavy-tests)
     add_test(NAME kj-heavy-tests-run COMMAND kj-heavy-tests)
   endif()  # NOT CAPNP_LITE
