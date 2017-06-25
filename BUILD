@@ -12,6 +12,7 @@ cc_library(
         ],
         exclude = [
             "c++/src/kj/**/*-test.c++",
+            "c++/src/kj/test-helpers.c++",
             "c++/src/kj/test.c++",
         ],
     ),
@@ -43,13 +44,19 @@ cc_library(
             "c++/src/capnp/compiler/capnp.c++",
             "c++/src/capnp/compiler/capnpc-c++.c++",
             "c++/src/capnp/compiler/capnpc-capnp.c++",
+            "c++/src/capnp/test.capnp.h",
             "c++/src/capnp/test-util.c++",
             "c++/src/capnp/**/*-test.c++",
+            "c++/src/capnp/**/*-testcase.c++"
         ],
     ),
-    hdrs = glob([
-        "c++/src/capnp/**/*.h",
-    ]),
+    hdrs = glob(
+        [
+            "c++/src/capnp/**/*.h",
+        ],
+        exclude = [
+            "c++/src/capnp/test-util.h",
+        ],),
     copts = [
         "-Wno-sign-compare",
     ],
