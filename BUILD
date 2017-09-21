@@ -27,6 +27,9 @@ cc_library(
     copts = [
         "-Wno-sign-compare",
         "-Wno-strict-aliasing",
+        "-Wno-unused-const-variable",
+        "-Wno-unused-function",
+        "-D_WINSOCK_DEPRECATED_NO_WARNINGS",
     ],
     defines = [
         "KJ_USE_FUTEX=0",
@@ -59,6 +62,8 @@ cc_library(
         ],),
     copts = [
         "-Wno-sign-compare",
+        "-Wno-unused-function",
+        "-Wno-unused-variable",
     ],
     linkopts = select({
         "@code8//bzl/crosstool:win32" : [ "-lAdvAPI32" ],
