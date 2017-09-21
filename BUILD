@@ -60,6 +60,11 @@ cc_library(
     copts = [
         "-Wno-sign-compare",
     ],
+    linkopts = select({
+        "@code8//bzl/crosstool:win32" : [ "-lAdvAPI32" ],
+        "@code8//bzl/crosstool:win64" : [ "-lAdvAPI32" ],
+        "//conditions:default": [],
+    }),
     includes = ["c++/src"],
     deps = [":kj"],
 )
