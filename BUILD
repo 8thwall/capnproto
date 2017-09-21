@@ -50,7 +50,7 @@ cc_library(
             "c++/src/capnp/test.capnp.h",
             "c++/src/capnp/test-util.c++",
             "c++/src/capnp/**/*-test.c++",
-            "c++/src/capnp/**/*-testcase.c++"
+            "c++/src/capnp/**/*-testcase.c++",
         ],
     ),
     hdrs = glob(
@@ -59,18 +59,17 @@ cc_library(
         ],
         exclude = [
             "c++/src/capnp/test-util.h",
-        ],),
+        ],
+    ),
     copts = [
         "-Wno-sign-compare",
-        "-Wno-unused-function",
-        "-Wno-unused-variable",
-    ]),
+    ],
+    includes = ["c++/src"],
     linkopts = select({
-        "@code8//bzl/crosstool:win32" : [ "-lAdvAPI32" ],
-        "@code8//bzl/crosstool:win64" : [ "-lAdvAPI32" ],
+        "@code8//bzl/crosstool:win32": ["-lAdvAPI32"],
+        "@code8//bzl/crosstool:win64": ["-lAdvAPI32"],
         "//conditions:default": [],
     }),
-    includes = ["c++/src"],
     deps = [":kj"],
 )
 
