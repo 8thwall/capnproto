@@ -332,7 +332,7 @@ public:
 
   template <typename Input>
   auto operator()(Input& input) const
-#ifndef _MSC_VER && !__clang__
+#if !_MSC_VER || __clang__
       -> Maybe<decltype(tuple(
           instance<OutputType<FirstSubParser, Input>>(),
           instance<OutputType<SubParsers, Input>>()...))>
@@ -343,7 +343,7 @@ public:
 
   template <typename Input, typename... InitialParams>
   auto parseNext(Input& input, InitialParams&&... initialParams) const
-#ifndef _MSC_VER && !__clang__
+#if !_MSC_VER || __clang__
       -> Maybe<decltype(tuple(
           kj::fwd<InitialParams>(initialParams)...,
           instance<OutputType<FirstSubParser, Input>>(),
