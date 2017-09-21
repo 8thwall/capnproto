@@ -626,7 +626,7 @@ struct ThrowOverflow {
   void operator()() const;
 };
 
-#if __GNUC__
+#if __GNUC__ || __clang__
 inline constexpr float inf() { return __builtin_huge_valf(); }
 inline constexpr float nan() { return __builtin_nanf(""); }
 

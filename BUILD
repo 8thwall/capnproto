@@ -65,8 +65,8 @@ cc_library(
         "-Wno-unused-function",
         "-Wno-unused-variable",
     ] + select({
-        "@code8//bzl/crosstool:win32" : [ "-Wno-unused-function", "-Wno-unused-variable", "-Wno-invalid-constexpr" ],
-        "@code8//bzl/crosstool:win64" : [ "-Wno-unused-function", "-Wno-unused-variable", "-Wno-invalid-constexpr" ],
+        "@code8//bzl/crosstool:win32" : [ "-Wno-unused-function", "-Wno-unused-variable" ],
+        "@code8//bzl/crosstool:win64" : [ "-Wno-unused-function", "-Wno-unused-variable" ],
         "//conditions:default": [],
     }),
     linkopts = select({
