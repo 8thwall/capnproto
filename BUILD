@@ -64,11 +64,7 @@ cc_library(
         "-Wno-sign-compare",
         "-Wno-unused-function",
         "-Wno-unused-variable",
-    ] + select({
-        "@code8//bzl/crosstool:win32" : [ "-Wno-unused-function", "-Wno-unused-variable" ],
-        "@code8//bzl/crosstool:win64" : [ "-Wno-unused-function", "-Wno-unused-variable" ],
-        "//conditions:default": [],
-    }),
+    ]),
     linkopts = select({
         "@code8//bzl/crosstool:win32" : [ "-lAdvAPI32" ],
         "@code8//bzl/crosstool:win64" : [ "-lAdvAPI32" ],
