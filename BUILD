@@ -29,6 +29,7 @@ cc_library(
         "-Wno-strict-aliasing",
         "-Wno-unused-const-variable",
         "-Wno-unused-function",
+        "-Wno-user-defined-warnings",
         "-D_WINSOCK_DEPRECATED_NO_WARNINGS",
     ],
     defines = [
