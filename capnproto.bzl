@@ -1,6 +1,6 @@
 def _impl(ctx):
-  includes = set(ctx.attr.includes + [ctx.attr.capnp_system_include])
-  inputs = set(ctx.files.srcs + ctx.files.data)
+  includes = depset(ctx.attr.includes + [ctx.attr.capnp_system_include])
+  inputs = depset(ctx.files.srcs + ctx.files.data)
   for dep_target in ctx.attr.deps:
     includes += dep_target.capnp.includes
     inputs += dep_target.capnp.inputs

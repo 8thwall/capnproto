@@ -90,6 +90,9 @@ genrule(
 cc_binary(
     name = "capnpc-c++",
     srcs = ["c++/src/capnp/compiler/capnpc-c++.c++"],
+    copts = [
+        "-Wno-enum-compare-switch",
+    ],
     deps = [":capnp-lib"],
 )
 
