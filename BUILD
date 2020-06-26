@@ -84,7 +84,7 @@ genrule(
     name = "capnpc-bin",
     srcs = [":capnp"],
     outs = ["capnpc"],
-    cmd = "ln -s $$PWD/$(location :capnp) $@",
+    cmd = "ln -s $$(basename $(location :capnp)) $@",
 )
 
 cc_binary(
